@@ -4,6 +4,8 @@
 
 A cross-platform libretro frontend and emulator launcher, built with Kotlin Multiplatform + Compose Multiplatform. Targets: macOS, Windows, Linux desktop + iOS, Android mobile.
 
+**Homepage:** <https://omilator.com>
+
 It does two things:
 - **Plays libretro cores** (mGBA, etc.) directly via a native libretro bridge — no separate RetroArch required.
 - **Launches standalone emulators** (Cemu, Dolphin, RPCS3, Xemu, PPSSPP) as a unified library.
