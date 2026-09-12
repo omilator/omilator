@@ -364,7 +364,15 @@ internal class LibretroFfm(
                 parseCoreOptions(data)
                 true
             }
-            RetroEnv.SET_CORE_OPTIONS_INTL -> true // accept but don't parse (intl variant, niche)
+            RetroEnv.SET_CORE_OPTIONS_INTL -> {
+                // retro_core_options_intl: the US definitions array at
+                // offset 0, followed by per-locale pointers. v1-negotiating
+                // cores with intl helpers reach this command; acknowledging
+                // it without parsing stored no definitions at all. The US
+                // section is laid out exactly like SET_CORE_OPTIONS.
+                parseCoreOptions(data)
+                true
+            }
             RetroEnv.SET_VARIABLES -> {
                 // Legacy interface: retro_variable { key*, value* }, value is
                 // "description; default". Parsed, so cores pushed here by
@@ -556,15 +564,18 @@ internal class LibretroFfm(
     }
 
     private fun handleGetVariable(data: MemorySegment): Boolean {
-        if (data.address() == 0L) return false
+        // data == NULL is a support probe: the facility exists, so the
+        // answer is success with nothing written.
+        if (data.address() == 0L) return true
         // retro_variable: { const char* key; const char* value; }
         val view = data.reinterpret(16L)
         val keySeg = view.get(ValueLayout.ADDRESS, 0)
-        if (keySeg.address() == 0L) return false
+        if (keySeg.address() == 0L) return true
         val key = keySeg.reinterpret(256L).getUtf8String(0)
 
-        // Look up stored value
-        val value = optionSelections[key] ?: return false
+        // Unknown variable: value stays NULL (the core uses its default),
+        // and the command still reports the interface as supported.
+        val value = optionSelections[key] ?: return true
 
         // Write value pointer to offset 8
         val valueSeg = arena.allocateUtf8String(value)
@@ -586,8 +597,13 @@ internal class LibretroFfm(
             val key = keySeg.reinterpret(256L).getUtf8String(0)
             val raw = if (valueSeg.address() != 0L) valueSeg.reinterpret(512L).getUtf8String(0) else ""
             val desc = raw.substringBefore("; ").ifBlank { key }
-            val default = raw.substringAfter("; ", "").ifBlank { "" }
-            coreOptions.add(CoreOption(key, desc, null, default, listOf(CoreOptionValue(default, default))))
+            // Legacy contract: the suffix is a |-delimited value list whose
+            // FIRST entry is the default ("Speed hack; false|true").
+            val listPart = raw.substringAfter("; ", "")
+            val choices = listPart.split('|').map { it.trim() }.filter { it.isNotEmpty() }
+            val default = choices.firstOrNull() ?: ""
+            val values = choices.map { CoreOptionValue(it, it) }
+            coreOptions.add(CoreOption(key, desc, null, default, values))
             if (key !in optionSelections && default.isNotBlank()) {
                 optionSelections[key] = default
             }

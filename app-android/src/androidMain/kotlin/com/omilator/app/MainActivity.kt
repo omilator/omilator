@@ -69,6 +69,7 @@ class MainActivity : ComponentActivity() {
 
         val configDir = File(filesDir, "config").apply { mkdirs() }
         val coresDir = File(filesDir, "cores").apply { mkdirs() }
+        val libretroDir = File(filesDir, "libretro").apply { mkdirs() }
         val settingsPath = File(configDir, "settings.json").absolutePath
         val settingsStore = SettingsStore(
             readText = { path -> File(path).takeIf { it.exists() }?.readText() },
@@ -94,6 +95,17 @@ class MainActivity : ComponentActivity() {
             settingsPath = settingsPath,
         )
         settingsViewModel = SettingsViewModel(settingsStore, settingsPath)
+
+        // Hydrate from disk BEFORE any settings action is reachable: the
+        // ViewModel starts from defaults, and its persist() copies those
+        // defaults wholesale - one tap on anything would atomically erase
+        // the persisted theme, directories and API key.
+        kotlinx.coroutines.runBlocking {
+            val settings = settingsStore.loadAppSettings(settingsPath)
+            settingsViewModel.setTheme(settings.theme)
+            settingsViewModel.setTheGamesDbApiKey(settings.theGamesDbApiKey)
+            settingsViewModel.setDirectories(settings.libraryDirectories)
+        }
         coreDownloader = AndroidCoreDownloader(coresDir)
 
         // Pre-populate core counts so Settings reflects reality.
@@ -116,7 +128,7 @@ class MainActivity : ComponentActivity() {
             if (rom != null && core != null) {
                 // Player screen — constructed fresh per session so the core
                 // + audio get clean state. onExit returns to library.
-                val coreController = remember { createCoreController("") }
+                val coreController = remember { createCoreController(libretroDir.absolutePath) }
                 val audioOutput = remember { createAudioOutputFactory().create() }
                 MobilePlayerScreen(
                     romPath = rom!!,

@@ -80,7 +80,11 @@ class AndroidCoreDownloader(private val coresDir: File) {
                 var entry2 = zis.nextEntry
                 while (entry2 != null) {
                     if (entry2.name.endsWith(".so")) {
-                        val outFile = File(coresDir, File(entry2.name).name)
+                        // The archive member is <core>_libretro_android.so;
+                        // every consumer (isInstalled, the launcher's core
+                        // resolution) looks for the canonical <core>_libretro.so,
+                        // so the extract lands under the canonical name.
+                        val outFile = File(coresDir, soName)
                         outFile.outputStream().use { output -> zis.copyTo(output) }
                         onProgress("Installed $soName (${outFile.length() / 1024}KB)")
                         conn.disconnect()
