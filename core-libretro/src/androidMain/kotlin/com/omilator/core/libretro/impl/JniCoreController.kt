@@ -12,9 +12,19 @@ import com.omilator.core.libretro.api.SystemInfo
 import com.omilator.core.libretro.api.Timing
 import com.omilator.core.libretro.api.VideoSink
 
-internal class JniCoreController : CoreController {
+internal class JniCoreController(private val systemDirectory: String) : CoreController {
 
     private var loaded: Boolean = false
+    private var corePath: String = ""
+
+    private companion object {
+        const val EXPERIMENTAL = 0x10000
+        const val GET_SYSTEM_DIRECTORY = 9
+        const val SET_PIXEL_FORMAT = 10
+        const val GET_LIBRETRO_PATH = 19
+        const val GET_SAVE_DIRECTORY = 31
+        const val GET_INPUT_BITMASKS = 51 or EXPERIMENTAL
+    }
     private var videoSink: VideoSink? = null
     private var audioSink: AudioSink? = null
     private var inputSource: InputSource? = null
@@ -26,6 +36,7 @@ internal class JniCoreController : CoreController {
 
     override suspend fun loadCore(path: String): SystemInfo {
         System.loadLibrary("omilator_jni")
+        corePath = path
         val ok = loadCoreNative(path)
         if (!ok) throw RuntimeException("Failed to load core: $path")
         loaded = true
@@ -114,13 +125,30 @@ internal class JniCoreController : CoreController {
     // controller instance via a global ref and calls these methods.
     @Suppress("unused")
     fun onEnvironment(cmd: Int, dataPtr: Long): Boolean {
-        // Pixel format cmd = 10: read int at *data
-        if (cmd == 10 && dataPtr != 0L) {
-            pixelFormat = readNativeInt(dataPtr)
-        }
-        // System dir / etc. are stubbed for Phase 4 v1.
+        // Success only after the command's required output is satisfied:
+        // raw 0/9/19/31 true-without-writes handed cores garbage pointers,
+        // and 51 must carry the EXPERIMENTAL bit (mask polling is NOT
+        // implemented, so it is honestly refused).
         return when (cmd) {
-            0, 9, 10, 19, 51 -> true
+            SET_PIXEL_FORMAT -> {
+                if (dataPtr != 0L) {
+                    pixelFormat = readNativeInt(dataPtr)
+                    true
+                } else false
+            }
+            GET_SYSTEM_DIRECTORY, GET_SAVE_DIRECTORY -> {
+                if (dataPtr != 0L) {
+                    writeNativeString(dataPtr, systemDirectory)
+                    true
+                } else false
+            }
+            GET_LIBRETRO_PATH -> {
+                if (dataPtr != 0L) {
+                    writeNativeString(dataPtr, corePath)
+                    true
+                } else false
+            }
+            GET_INPUT_BITMASKS -> false
             else -> false
         }
     }
@@ -182,6 +210,7 @@ internal class JniCoreController : CoreController {
     private external fun loadCoreNative(path: String): Boolean
     private external fun loadGameNative(path: String): Boolean
     private external fun systemAvInfoNative(): DoubleArray
+    private external fun writeNativeString(ptr: Long, s: String)
     private external fun runFrameNative()
     private external fun resetNative()
     private external fun unloadGameNative()

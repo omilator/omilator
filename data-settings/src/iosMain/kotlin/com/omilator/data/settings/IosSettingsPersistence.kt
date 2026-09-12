@@ -64,16 +64,17 @@ class IosSettingsPersistence(private val settingsPath: String) {
         // corrupt JSON that silently resets every setting.
         val tmpPath = "$path.tmp"
         memScoped {
-            val fp = fopen(tmpPath, "wb") ?: return@withContext
+            val fp = fopen(tmpPath, "wb") ?: throw RuntimeException("cannot open $tmpPath for writing")
             try {
                 val buf = allocArray<ByteVar>(bytes.size)
                 for (i in bytes.indices) buf[i] = bytes[i]
-                fwrite(buf, 1u, bytes.size.toULong(), fp)
+                val written = fwrite(buf, 1u, bytes.size.toULong(), fp)
+                check(written == bytes.size.toULong()) { "short settings write: $written/${bytes.size}" }
             } finally {
                 fclose(fp)
             }
         }
-        rename(tmpPath, path)
+        check(rename(tmpPath, path) == 0) { "settings replace failed for $path" }
     }
 
     fun settingsStore(): SettingsStore = SettingsStore(

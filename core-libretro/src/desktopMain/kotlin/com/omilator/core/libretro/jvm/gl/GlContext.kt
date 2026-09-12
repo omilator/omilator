@@ -75,11 +75,19 @@ internal class GlContext private constructor(
      * GL's origin is bottom-left; libretro expects top-left. Rows are
      * returned in GL order — caller is responsible for flipping if needed.
      */
-    fun readPixelsRGBA(): ByteArray {
-        val buffer = MemoryUtil.memAlloc(width * height * 4)
+    fun readPixelsRGBA(): ByteArray = readPixelsRGBA(width, height)
+
+    /**
+     * Sub-rect readback: the FBO is sized to the core's maximum geometry,
+     * but the presented frame is the (smaller) viewport the core reported
+     * for THIS frame - reading the whole buffer every frame returned stale
+     * maximum-size images for variable-resolution cores.
+     */
+    fun readPixelsRGBA(w: Int, h: Int): ByteArray {
+        val buffer = MemoryUtil.memAlloc(w * h * 4)
         return try {
             GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, fbo)
-            GL11.glReadPixels(0, 0, width, height, GL12.GL_BGRA, GL11.GL_UNSIGNED_BYTE, buffer)
+            GL11.glReadPixels(0, 0, w, h, GL12.GL_BGRA, GL11.GL_UNSIGNED_BYTE, buffer)
             GL30.glBindFramebuffer(GL30.GL_FRAMEBUFFER, 0)
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)

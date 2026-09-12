@@ -66,36 +66,45 @@ internal val envCb = staticCFunction { cmd: Int, data: CPointer<ByteVar>? ->
     result
 }
 
-internal val videoCb = staticCFunction { data: CPointer<ByteVar>?, width: Int, height: Int, pitch: Int ->
+// C-width signatures: retro_video_refresh_t is (const void*, unsigned,
+// unsigned, size_t) and retro_audio_sample_batch_t is (const int16_t*,
+// size_t) -> size_t on arm64 - calling through Int-typed pointers truncates
+// the 64-bit size_t arguments.
+private fun videoImpl(data: CPointer<ByteVar>?, width: UInt, height: UInt, pitch: ULong) {
     val ctrl = nativeControllerInstance
-    if (ctrl != null && data != null && width > 0 && height > 0 && pitch > 0) {
-        val size = height * pitch
+    if (ctrl != null && data != null && width > 0u && height > 0u && pitch > 0u) {
+        val size = (height * pitch.toUInt()).toInt()
         val bytes = data.readBytes(size)
         val format = when (ctrl.pixelFormat) {
             1 -> PixelFormat.XRGB8888
             2 -> PixelFormat.RGB565
             else -> PixelFormat.ORGB1555
         }
-        ctrl.videoSink?.onFrame(Framebuffer(bytes, width.toUInt(), height.toUInt(), pitch.toUInt(), format))
+        ctrl.videoSink?.onFrame(Framebuffer(bytes, width, height, pitch.toUInt(), format))
     }
 }
 
-internal val audioBatchCb = staticCFunction { data: CPointer<ByteVar>?, frames: Int ->
+internal val videoCb = staticCFunction(::videoImpl)
+
+private fun audioBatchImpl(data: CPointer<ByteVar>?, frames: ULong): ULong {
     val ctrl = nativeControllerInstance
-    if (ctrl != null && data != null && frames > 0) {
+    if (ctrl != null && data != null && frames > 0uL) {
         // Interpret data as int16_t* (stereo samples)
         val shortPtr = data.reinterpret<ShortVar>()
-        val count = frames * 2
+        val count = (frames * 2uL).toInt()
         val samples = ShortArray(count) { i -> shortPtr[i] }
         ctrl.audioSink?.onSamples(samples)
     }
-    frames
+    return frames
 }
 
-internal val audioSampleCb = staticCFunction { left: Int, right: Int ->
-    nativeControllerInstance?.audioSink?.onSamples(shortArrayOf(left.toShort(), right.toShort()))
-    Unit
+internal val audioBatchCb = staticCFunction(::audioBatchImpl)
+
+private fun audioSampleImpl(left: Short, right: Short) {
+    nativeControllerInstance?.audioSink?.onSamples(shortArrayOf(left, right))
 }
+
+internal val audioSampleCb = staticCFunction(::audioSampleImpl)
 
 // 0-arg callback, typed as a function reference to avoid the lambda
 // overload ambiguity (see hwGetFramebufferCb).
@@ -121,6 +130,10 @@ internal class NativeCoreController : CoreController {
     private var handle: CPointer<*>? = null
     private var loaded = false
     internal var pixelFormat = 0
+    /** Retained from retro_get_system_info; full-path cores get a path and
+     *  no data, which also lifts the in-memory size cap for disc images. */
+    private var needFullPath = false
+    private var corePath: String = ""
     internal var videoSink: VideoSink? = null
     internal var audioSink: AudioSink? = null
     internal var inputSource: InputSource? = null
@@ -139,6 +152,7 @@ internal class NativeCoreController : CoreController {
                 throw RuntimeException("dlopen failed: $path — $err")
             }
         handle = h
+        corePath = path
 
         // Set callbacks — cast function pointers to opaque
         val envPtr: COpaquePointer? = envCb
@@ -165,7 +179,8 @@ internal class NativeCoreController : CoreController {
         var version = "0.0"
         var ext = ""
         memScoped {
-            val buf = allocArray<ByteVar>(48)
+            val buf = allocArray<ByteVar>(32)
+            memset(buf, 0, 32u)
             dlsym(h, "retro_get_system_info")
                 ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Unit>>()
                 ?.invoke(buf)
@@ -173,6 +188,8 @@ internal class NativeCoreController : CoreController {
             name = ptrs[0]?.toKString() ?: "unknown"
             version = ptrs[1]?.toKString() ?: "0.0"
             ext = ptrs[2]?.toKString() ?: ""
+            // struct retro_system_info: 3 pointers then the two bools at 24/25
+            needFullPath = buf[24].toInt() != 0
         }
 
         loaded = true
@@ -210,34 +227,46 @@ internal class NativeCoreController : CoreController {
         for (i in pathBytes.indices) pathPtr[i] = pathBytes[i]
         gamePathPtr = pathPtr
 
-        // mGBA can't fopen() inside the iOS Simulator sandbox — load ROM
-        // into memory and pass data+size instead of relying on path. One
-        // copy, straight into nativeHeap; 64-bit file size, capped.
-        val romSize = fileSizeBytes64(romPath)
-        require(romSize in 1..MAX_IN_MEMORY_ROM) {
-            "ROM is ${romSize shr 20} MB; the in-memory limit is ${MAX_IN_MEMORY_ROM shr 20} MB"
-        }
-        val dataBuf = nativeHeap.allocArray<ByteVar>(romSize)
-        val fp = fopen(romPath, "rb") ?: throw RuntimeException("Cannot open ROM: $romPath")
-        try {
-            val got = fread(dataBuf, 1.toULong(), romSize.toULong(), fp)
-            if (got != romSize.toULong()) throw RuntimeException("Short read on ROM: $romPath")
-        } finally {
-            fclose(fp)
-        }
-        gameDataPtr = dataBuf
-
         // retro_game_info layout (arm64):
         // offset 0: path (char*), offset 8: data (void*),
         // offset 16: size (Long), offset 24: meta (char* — left NULL)
-        info.reinterpret<CPointerVar<ByteVar>>()[0] = pathPtr
-        info.reinterpret<CPointerVar<ByteVar>>()[1] = dataBuf.reinterpret()
-        info.reinterpret<LongVar>()[2] = romSize
+        try {
+            if (needFullPath) {
+                // The core declared it opens content itself: a valid path and
+                // NULL data/size is the contract, and disc images of any size
+                // stay loadable.
+                info.reinterpret<CPointerVar<ByteVar>>()[0] = pathPtr
+            } else {
+                // In-memory content (the simulator sandbox cannot always be
+                // fopen'ed by cores). One copy, straight into nativeHeap;
+                // 64-bit file size, capped. Ownership transfers to
+                // gameDataPtr immediately so every failure path frees it.
+                val romSize = fileSizeBytes64(romPath)
+                require(romSize in 1..MAX_IN_MEMORY_ROM) {
+                    "ROM is ${romSize shr 20} MB; the in-memory limit is ${MAX_IN_MEMORY_ROM shr 20} MB"
+                }
+                val dataBuf = nativeHeap.allocArray<ByteVar>(romSize)
+                gameDataPtr = dataBuf
+                val fp = fopen(romPath, "rb") ?: throw RuntimeException("Cannot open ROM: $romPath")
+                try {
+                    val got = fread(dataBuf, 1.toULong(), romSize.toULong(), fp)
+                    if (got != romSize.toULong()) throw RuntimeException("Short read on ROM: $romPath")
+                } finally {
+                    fclose(fp)
+                }
+                info.reinterpret<CPointerVar<ByteVar>>()[0] = pathPtr
+                info.reinterpret<CPointerVar<ByteVar>>()[1] = dataBuf.reinterpret()
+                info.reinterpret<LongVar>()[2] = romSize
+            }
 
-        val ok = dlsym(handle, "retro_load_game")
-            ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Boolean>>()
-            ?.invoke(info) ?: false
-        require(ok) { "retro_load_game returned false" }
+            val ok = dlsym(handle, "retro_load_game")
+                ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Boolean>>()
+                ?.invoke(info) ?: false
+            require(ok) { "retro_load_game returned false" }
+        } catch (t: Throwable) {
+            freeGameInfo()
+            throw t
+        }
 
         return readSystemAvInfo()
     }
@@ -245,8 +274,12 @@ internal class NativeCoreController : CoreController {
     /** Real values from retro_get_system_av_info; hardcoded GBA figures
      *  pitched every other system's audio wrong. */
     private fun readSystemAvInfo(): AvInfo = memScoped {
-        // geometry: 4 uints + float (20 bytes), pad 4, timing: 2 doubles at 24/32
+        // geometry: 4 uints + float (20 bytes), pad 4, timing: 2 doubles at 24/32.
+        // Zeroed first: cores may leave optional fields (aspect_ratio)
+        // unspecified, and reading unzeroed native memory would treat the
+        // garbage as a value.
         val buf = allocArray<ByteVar>(48)
+        memset(buf, 0, 48u)
         dlsym(handle, "retro_get_system_av_info")
             ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Unit>>()
             ?.invoke(buf)
@@ -285,6 +318,8 @@ internal class NativeCoreController : CoreController {
         dlsym(handle, "retro_deinit")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
         handle?.let { dlclose(it) }
         handle = null; loaded = false; nativeControllerInstance = null
+        retainedEnvStrings.forEach(nativeHeap::free)
+        retainedEnvStrings.clear()
     }
 
     override fun attach(video: VideoSink, audio: AudioSink, input: InputSource) {
@@ -301,16 +336,36 @@ internal class NativeCoreController : CoreController {
     override fun cheatSet(index: Int, enabled: Boolean, code: String) {}
 
     internal fun handleEnv(cmd: Int, data: COpaquePointer?): Boolean {
+        // Success only after the command's required output is written; the
+        // old raw 0/9/19/31/51/69 list returned true for commands it never
+        // satisfied (and 51 must carry the 0x10000 experimental bit).
         return when (cmd) {
             10 -> { // SET_PIXEL_FORMAT
                 data?.reinterpret<IntVar>()?.let { pixelFormat = it.pointed.value }
-                true
+                data != null
             }
             14 -> handleSetHwRender(data?.reinterpret<ByteVar>())
-            0, 9, 19, 31, 51, 69 -> true
+            9, 31 -> { // GET_SYSTEM_DIRECTORY / GET_SAVE_DIRECTORY
+                if (data != null) {
+                    val dir = systemDir ?: ""
+                    if (dir.isNotEmpty()) {
+                        val bytes = dir.encodeToByteArray() + 0.toByte()
+                        val dst = nativeHeap.allocArray<ByteVar>(bytes.size)
+                        for (i in bytes.indices) dst[i] = bytes[i]
+                        retainedEnvStrings.add(dst)
+                        data.reinterpret<CPointerVar<ByteVar>>()[0] = dst
+                        true
+                    } else false
+                } else false
+            }
             else -> false
         }
     }
+
+    private val retainedEnvStrings = mutableListOf<CPointer<ByteVar>>()
+
+    /** Set once at loadCore from the controller factory's system directory. */
+    internal var systemDir: String? = null
 
     /**
      * Handle RETRO_ENVIRONMENT_SET_HW_RENDER (cmd 14). The core passes a

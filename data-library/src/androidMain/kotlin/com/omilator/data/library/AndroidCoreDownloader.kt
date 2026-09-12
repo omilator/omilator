@@ -38,7 +38,14 @@ class AndroidCoreDownloader(private val coresDir: File) {
         CoreEntry("flycast", "Dreamcast (Vulkan)", "flycast_libretro"),
     )
 
-    private val buildbotBase = "https://buildbot.libretro.com/nightly/android/arm64-v8a/latest"
+    // Current buildbot layout is /android/latest/<abi>/, and artifacts carry
+    // an _android infix; the ABI is chosen at runtime so emulators/devices on
+    // x86_64 get working cores too.
+    private val abi: String = android.os.Build.SUPPORTED_ABIS.firstOrNull {
+        it == "arm64-v8a" || it == "x86_64"
+    } ?: error("Unsupported ABI: ${android.os.Build.SUPPORTED_ABIS.toList()}")
+
+    private val buildbotBase = "https://buildbot.libretro.com/nightly/android/latest/$abi"
 
     fun isInstalled(entry: CoreEntry): Boolean =
         File(coresDir, "${entry.name}_libretro.so").exists()
@@ -58,7 +65,7 @@ class AndroidCoreDownloader(private val coresDir: File) {
             return true
         }
 
-        val zipUrl = "$buildbotBase/${entry.urlName}.so.zip"
+        val zipUrl = "$buildbotBase/${entry.urlName}_android.so.zip"
         onProgress("Downloading $soName...")
         return try {
             val conn = URL(zipUrl).openConnection() as HttpURLConnection

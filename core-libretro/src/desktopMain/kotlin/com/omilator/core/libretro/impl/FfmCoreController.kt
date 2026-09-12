@@ -51,6 +51,7 @@ internal class FfmCoreController(
                 installMediaCallbacks()
                 callInit()
                 onVideo = ::dispatchVideo
+                onHwVideo = ::dispatchHwVideo
                 onAudioBatch = ::dispatchAudioBatch
                 onInputState = ::dispatchInputState
             }
@@ -194,6 +195,21 @@ internal class FfmCoreController(
                 height = height.toUInt(),
                 pitch = pitch.toUInt(),
                 format = format,
+            ),
+        )
+    }
+
+    /** HW readback is always 32-bit BGRA, regardless of the core's software
+     *  pixel format - the old path decoded it through that format, reading
+     *  4-byte pixels as 2-byte for 16-bit cores. */
+    private fun dispatchHwVideo(bytes: ByteArray, width: Int, height: Int) {
+        videoSink?.onFrame(
+            Framebuffer(
+                data = bytes,
+                width = width.toUInt(),
+                height = height.toUInt(),
+                pitch = (width * 4).toUInt(),
+                format = PixelFormat.XRGB8888,
             ),
         )
     }

@@ -72,7 +72,20 @@ class MainActivity : ComponentActivity() {
         val settingsPath = File(configDir, "settings.json").absolutePath
         val settingsStore = SettingsStore(
             readText = { path -> File(path).takeIf { it.exists() }?.readText() },
-            writeText = { path, content -> File(path).writeText(content) },
+            writeText = { path, content ->
+                // Files.writeString needs API 34; writeText is available
+                // everywhere and the atomicity comes from the move.
+                val target = java.nio.file.Paths.get(path)
+                val tmp = target.resolveSibling(".arcade-tmp-settings").toFile()
+                tmp.writeText(content)
+                try {
+                    java.nio.file.Files.move(tmp.toPath(), target,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+                } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                    java.nio.file.Files.move(tmp.toPath(), target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+            },
         )
 
         libraryViewModel = LibraryViewModel(

@@ -67,7 +67,7 @@ fun main() = application {
     val settingsStore = remember {
         SettingsStore(
             readText = { path -> File(path).takeIf { it.exists() }?.readText() },
-            writeText = { path, content -> File(path).writeText(content) },
+            writeText = { path, content -> atomicWriteText(java.nio.file.Paths.get(path), content) },
         )
     }
     val coresDir = remember { File(configDir, "cores") }
@@ -256,7 +256,28 @@ fun main() = application {
  *     which would SIGBUS the JVM)
  * For all other systems → use libretro via the in-process player.
  */
+private val isMacOS = System.getProperty("os.name").contains("Mac", ignoreCase = true)
+
+private fun atomicWriteText(target: java.nio.file.Path, content: String) {
+    val tmp = target.resolveSibling(".arcade-tmp-settings")
+    java.nio.file.Files.writeString(tmp, content)
+    try {
+        java.nio.file.Files.move(tmp, target,
+            java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+        java.nio.file.Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+
 private fun playRom(romPath: String, useLibretro: (String) -> Unit) {
+    // The standalone-emulator fallback is a macOS .app launcher; on other
+    // desktops the blocklist below only prevented the libretro path before
+    // routing into a launcher that cannot work there.
+    if (!isMacOS) {
+        useLibretro(romPath)
+        return
+    }
     val ext = File(romPath).extension.lowercase()
     val blockedSystemId = when (ext) {
         "iso", "cso", "prx" -> "psp"

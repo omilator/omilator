@@ -91,20 +91,17 @@ class IosAudioOutput : AudioOutput {
         // Backpressure: cap queued buffers so a stalled engine can't grow
         // memory unbounded. Drop new input until something drains. Torn read
         // is harmless — at worst we drop or queue one extra batch.
-        val myGeneration = pendingLock.withLock {
-            if (pendingBuffers >= MAX_PENDING) return samples.size
-            pendingBuffers++
-            generation
-        }
-
+        // Reserve LAST: every failure between the old reservation and the
+        // schedule permanently consumed a backpressure slot.
         val frames = samples.size / channels
         if (frames == 0) return samples.size
-
         val buffer = AVAudioPCMBuffer(pCMFormat = fmt, frameCapacity = frames.toUInt())
             ?: return samples.size
         buffer.frameLength = frames.toUInt()
-
-        val channelsPtr = buffer.floatChannelData ?: return samples.size
+        val channelsPtr = buffer.floatChannelData ?: run {
+            // buffer leaked below is fine (ARC); no reservation was taken yet
+            return samples.size
+        }
         val scale = 1f / 32768f
         if (channels == 2) {
             val left = channelsPtr[0]!!
@@ -120,6 +117,11 @@ class IosAudioOutput : AudioOutput {
             for (f in 0 until frames) {
                 ch[f] = samples[f].toFloat() * scale
             }
+        }
+        val myGeneration = pendingLock.withLock {
+            if (pendingBuffers >= MAX_PENDING) return samples.size
+            pendingBuffers++
+            generation
         }
 
         if (!firstBufferLogged) {
@@ -152,6 +154,12 @@ class IosAudioOutput : AudioOutput {
     }
 
     private fun stop() {
+        // Invalidate before tearing the node down: callbacks already queued
+        // by the old node must not decrement a future session's counter.
+        pendingLock.withLock {
+            generation++
+            pendingBuffers = 0
+        }
         if (started) {
             playerNode?.stop()
             engine?.stop()

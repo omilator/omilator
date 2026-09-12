@@ -65,7 +65,7 @@ class CoreDownloader(private val targetDir: File) {
             return true
         }
 
-        val zipUrl = "$buildbotBase/${entry.name}_${platform.coreExt}.zip"
+        val zipUrl = "$buildbotBase/${entry.name}.${platform.coreExt}.zip"
         onProgress("Downloading $libName...")
         return try {
             targetDir.mkdirs()

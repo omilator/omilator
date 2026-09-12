@@ -32,12 +32,27 @@ private class PickerDelegate(
                 platform.Foundation.NSUserDomainMask,
                 true,
             ).firstOrNull() as? String) ?: return onPicked(url.path)
+            val src = url.path ?: return onPicked(null)
             val dest = "$docs/${url.lastPathComponent}"
-            if (fm.fileExistsAtPath(dest)) {
-                fm.removeItemAtPath(dest, null)
+            // Already inside Documents: selecting it must not delete-then-fail
+            // copying onto itself.
+            if (src == dest) {
+                onPicked(src)
+                return
             }
-            val copied = fm.copyItemAtPath(url.path ?: "", toPath = dest, error = null)
-            onPicked(if (copied) dest else url.path)
+            // Never remove the existing destination first: copy to a unique
+            // path instead, so an existing import (or the source itself) is
+            // only ever replaced by a COMPLETE copy.
+            var finalDest = dest
+            var n = 1
+            while (fm.fileExistsAtPath(finalDest)) {
+                val ext = dest.substringAfterLast('.', "")
+                val stem = if (ext.isEmpty()) dest else dest.substringBeforeLast('.')
+                finalDest = if (ext.isEmpty()) "$stem ($n)" else "$stem ($n).$ext"
+                n++
+            }
+            val copied = fm.copyItemAtPath(src, toPath = finalDest, error = null)
+            onPicked(if (copied) finalDest else null)
         } finally {
             if (accessing) url.stopAccessingSecurityScopedResource()
         }

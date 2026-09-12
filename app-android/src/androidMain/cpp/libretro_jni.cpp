@@ -319,6 +319,17 @@ Java_com_omilator_core_libretro_impl_JniCoreController_systemAvInfoNative(
     return arr;
 }
 
+JNIEXPORT void JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_writeNativeString(
+    JNIEnv* env, jobject, jlong ptr, jstring s) {
+    if (ptr == 0 || s == nullptr) return;
+    const char* chars = env->GetStringUTFChars(s, nullptr);
+    if (chars == nullptr) return;
+    size_t len = strlen(chars) + 1;
+    memcpy(reinterpret_cast<void*>(ptr), chars, len);
+    env->ReleaseStringUTFChars(s, chars);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_omilator_core_libretro_impl_JniCoreController_readNativeInt(
     JNIEnv*, jobject, jlong ptr) {

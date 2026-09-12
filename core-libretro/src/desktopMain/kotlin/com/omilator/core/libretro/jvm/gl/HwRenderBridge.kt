@@ -50,19 +50,18 @@ internal class HwRenderBridge(private val arena: Arena) {
         if (data.address() == 0L) return false
         val sized = data.reinterpret(64L)
         val ctxType = sized.get(ValueLayout.JAVA_INT, 0)
-        val supportedType = when (ctxType) {
-            HW_CONTEXT_OPENGL, HW_CONTEXT_OPENGL_CORE,
-            HW_CONTEXT_OPENGLES2, HW_CONTEXT_OPENGLES3,
-            HW_CONTEXT_OPENGLES_VERSION -> true
-            else -> false
-        }
-        if (!supportedType) {
-            println("[Omilator] SET_HW_RENDER: unsupported context_type=$ctxType — declining")
-            return false
-        }
-
         val major = sized.get(ValueLayout.JAVA_INT, 36)
         val minor = sized.get(ValueLayout.JAVA_INT, 40)
+        // Honest acceptance: this frontend creates exactly one desktop
+        // OpenGL 3.2 CORE context. GLES needs EGL (not desktop GL), legacy
+        // OPENGL lacks the 3.0 framebuffer ops the readback uses, and macOS
+        // cannot provide GL 4.x - accepting those anyway handed cores a
+        // context that did not match what they asked for.
+        val supported = ctxType == HW_CONTEXT_OPENGL_CORE && major <= 3
+        if (!supported) {
+            println("[Omilator] SET_HW_RENDER: cannot provide context_type=$ctxType v$major.$minor — declining")
+            return false
+        }
         bottomLeftOrigin = sized.get(ValueLayout.JAVA_BYTE, 34) != 0.toByte()
         println("[Omilator] SET_HW_RENDER: OpenGL ctx_type=$ctxType v$major.$minor — providing")
 
@@ -119,10 +118,15 @@ internal class HwRenderBridge(private val arena: Arena) {
     fun unbind() { gl?.unbind() }
 
     fun readPixels(): ByteArray? {
-        val raw = gl?.readPixelsRGBA() ?: return null
         val w = framebufferWidth()
         val h = framebufferHeight()
-        if (bottomLeftOrigin || w <= 0 || h <= 0) return raw
+        return readPixels(w, h)
+    }
+
+    fun readPixels(w: Int, h: Int): ByteArray? {
+        if (w <= 0 || h <= 0) return null
+        val raw = gl?.readPixelsRGBA(w, h) ?: return null
+        if (bottomLeftOrigin) return raw
         val stride = w * 4
         val flipped = ByteArray(raw.size)
         for (y in 0 until h) {

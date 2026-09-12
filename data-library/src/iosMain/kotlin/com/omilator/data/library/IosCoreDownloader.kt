@@ -34,20 +34,20 @@ class IosCoreDownloader(private val coresDir: String) {
      * their libretro core id.
      */
     val cores: List<CoreEntry> = listOf(
-        CoreEntry("mgba", "GB / GBC / GBA", "mgba_libretro_ios"),
-        CoreEntry("mesen", "NES", "mesen_libretro_ios"),
-        CoreEntry("snes9x", "SNES", "snes9x_libretro_ios"),
-        CoreEntry("genesis_plus_gx", "Genesis / Mega Drive", "genesis_plus_gx_libretro_ios"),
-        CoreEntry("mupen64plus_next", "N64 (software render)", "mupen64plus_next_libretro_ios"),
-        CoreEntry("mednafen_psx_hw", "PS1 (accurate)", "mednafen_psx_hw_libretro_ios"),
-        CoreEntry("pcsx_rearmed", "PS1 (fast)", "pcsx_rearmed_libretro_ios"),
-        CoreEntry("melonds", "DS", "melonds_libretro_ios"),
-        CoreEntry("mednafen_saturn", "Saturn", "mednafen_saturn_libretro_ios"),
-        CoreEntry("nestopia", "NES (alt)", "nestopia_libretro_ios"),
-        CoreEntry("gambatte", "GB / GBC (alt)", "gambatte_libretro_ios"),
-        CoreEntry("sameboy", "GB / GBC (accurate)", "sameboy_libretro_ios"),
-        CoreEntry("fbneo", "Arcade", "fbneo_libretro_ios"),
-        CoreEntry("picodrive", "Genesis / 32X", "picodrive_libretro_ios"),
+        CoreEntry("mgba", "GB / GBC / GBA", "mgba_libretro"),
+        CoreEntry("mesen", "NES", "mesen_libretro"),
+        CoreEntry("snes9x", "SNES", "snes9x_libretro"),
+        CoreEntry("genesis_plus_gx", "Genesis / Mega Drive", "genesis_plus_gx_libretro"),
+        CoreEntry("mupen64plus_next", "N64 (software render)", "mupen64plus_next_libretro"),
+        CoreEntry("mednafen_psx_hw", "PS1 (accurate)", "mednafen_psx_hw_libretro"),
+        CoreEntry("pcsx_rearmed", "PS1 (fast)", "pcsx_rearmed_libretro"),
+        CoreEntry("melonds", "DS", "melonds_libretro"),
+        CoreEntry("mednafen_saturn", "Saturn", "mednafen_saturn_libretro"),
+        CoreEntry("nestopia", "NES (alt)", "nestopia_libretro"),
+        CoreEntry("gambatte", "GB / GBC (alt)", "gambatte_libretro"),
+        CoreEntry("sameboy", "GB / GBC (accurate)", "sameboy_libretro"),
+        CoreEntry("fbneo", "Arcade", "fbneo_libretro"),
+        CoreEntry("picodrive", "Genesis / 32X", "picodrive_libretro"),
         // HW-render cores (Vulkan via MoltenVK). Require MoltenVK.xcframework
         // bundled in the app (see setup-moltenvk.sh + iosApp/project.yml).
         // SET_HW_RENDER handler in NativeCoreController.kt accepts VULKAN

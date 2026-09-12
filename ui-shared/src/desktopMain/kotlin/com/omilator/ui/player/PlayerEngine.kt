@@ -18,7 +18,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -91,14 +93,34 @@ class PlayerEngine(
     private fun flushSram() {
         runCatching {
             val data = controller.readSaveRam()
-            if (data.isNotEmpty()) sramFile().writeBytes(data)
+            if (data.isEmpty()) return
+            // Atomic replace: a crash mid-write over the live file would
+            // corrupt the only durable battery save.
+            val dst = sramFile().toPath()
+            val tmp = dst.resolveSibling(".arcade-tmp-sram")
+            java.nio.file.Files.write(tmp, data)
+            try {
+                java.nio.file.Files.move(tmp, dst, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(tmp, dst, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
         }
     }
 
     private fun sramFile(): java.io.File {
         val dir = java.io.File(System.getProperty("user.home"),
             "Library/Application Support/Omilator/saves").apply { mkdirs() }
-        return java.io.File(dir, "${java.io.File(romPath).nameWithoutExtension}.srm")
+        // The basename alone collided across games in different directories
+        // or systems - one game could restore and then overwrite another's
+        // battery RAM. The canonical path is hashed into the name.
+        val canonical = java.io.File(romPath).canonicalPath
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(canonical.encodeToByteArray())
+            .take(8)
+            .joinToString("") { "%02x".format(it) }
+        val base = java.io.File(romPath).nameWithoutExtension.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return java.io.File(dir, "$base-$digest.srm")
     }
 
     private fun loadPersistedOptions() {
@@ -187,7 +209,11 @@ class PlayerEngine(
     private suspend fun runLoop(targetFps: Float) {
         val baseIntervalNanos = (1_000_000_000.0 / targetFps).toLong()
         var nextDeadline = System.nanoTime()
-        while (scope.isActive) {
+        // The loop observes ITS OWN cancellation: testing the parent scope
+        // meant stop()'s cancelAndJoin could wait forever on a loop running
+        // behind schedule that never reached a suspension point.
+        while (currentCoroutineContext().isActive) {
+            currentCoroutineContext().ensureActive()
             // Poll gamepad before each frame
             gamepadPoller.poll(
                 setButton = { btn, pressed ->
@@ -327,7 +353,16 @@ private class InputSourceAdapter(private val holder: InputStateHolder) : InputSo
         if (port != 0) return 0
         return when (device) {
             InputDevice.JOYPAD -> holder.get(id)
-            InputDevice.ANALOG -> holder.analog(index)
+            InputDevice.ANALOG -> when (index) {
+                // Libretro encodes stick in `index` (0=left, 1=right) and
+                // axis in `id` (0=X, 1=Y); the poller stores
+                // [leftX, leftY, rightX, rightY].
+                0, 1 -> when (id) {
+                    0, 1 -> holder.analog(index * 2 + id)
+                    else -> 0
+                }
+                else -> 0
+            }
             else -> 0
         }
     }

@@ -31,6 +31,17 @@ internal class LibretroFfm(
     private val linker = Linker.nativeLinker()
 
     var onVideo: ((MemorySegment, Int, Int, Long) -> Unit)? = null
+
+    /**
+     * HW-render frames: readback pixels in BGRA order with the frame's own
+     * dimensions - a separate sink because the software path's pixel-format
+     * selection does not apply (the readback is always 32-bit BGRA).
+     */
+    var onHwVideo: ((ByteArray, Int, Int) -> Unit)? = null
+
+    private var hwFrameW = 0
+    private var hwFrameH = 0
+    private var hwFrameValid = false
     var onAudioBatch: ((MemorySegment, Long) -> Long)? = null
     var onInputState: ((Int, Int, Int, Int) -> Short)? = null
 
@@ -68,6 +79,7 @@ internal class LibretroFfm(
     private var cheatSetHandle: MethodHandle? = null
 
     private val systemDirSeg = arena.allocateUtf8String(systemDirectory)
+    private var corePathSeg: MemorySegment? = null
     val hwRender: HwRenderBridge = HwRenderBridge(arena)
 
     /** FFM upcall fallbacks (used only if libomilator_log.dylib is missing). */
@@ -88,6 +100,7 @@ internal class LibretroFfm(
     }
 
     fun loadCore(path: String) {
+        corePathSeg = arena.allocateUtf8String(path)
         val sym = SymbolLookup.libraryLookup(path, arena)
 
         apiVersion = sym.down("retro_api_version", FunctionDescriptor.of(ValueLayout.JAVA_INT))
@@ -284,7 +297,17 @@ internal class LibretroFfm(
     }
 
     @Suppress("unused")
-    fun onEnvironment(cmd: Int, data: MemorySegment): Boolean {
+    fun onEnvironment(cmd: Int, data: MemorySegment): Boolean =
+        try {
+            handleEnvironment(cmd, data)
+        } catch (t: Throwable) {
+            // An exception crossing the FFM upcall boundary is a process
+            // crash; a failed environment command is just "unsupported".
+            System.err.println("[Omilator] env cmd $cmd failed: ${t.message}")
+            false
+        }
+
+    private fun handleEnvironment(cmd: Int, data: MemorySegment): Boolean {
         val handled = when (cmd) {
             RetroEnv.SET_PIXEL_FORMAT -> {
                 pixelFormat = data.reinterpret(4L).get(ValueLayout.JAVA_INT, 0)
@@ -295,9 +318,23 @@ internal class LibretroFfm(
                 data.reinterpret(8L).set(ValueLayout.ADDRESS, 0, systemDirSeg)
                 true
             }
-            RetroEnv.GET_LIBRETRO_PATH,
-            RetroEnv.GET_INPUT_BITMASKS,
-            RetroEnv.GET_AUDIO_VIDEO_ENABLE -> true
+            RetroEnv.GET_LIBRETRO_PATH -> {
+                data.reinterpret(8L).set(ValueLayout.ADDRESS, 0, corePathSeg)
+                true
+            }
+            RetroEnv.GET_AUDIO_VIDEO_ENABLE -> {
+                // Bit0 video, bit1 audio - both enabled.
+                data.reinterpret(4L).set(ValueLayout.JAVA_INT, 0, 0x1 or 0x2)
+                true
+            }
+            RetroEnv.GET_INPUT_BITMASKS -> false // honest: id==256 mask polling is not implemented
+            RetroEnv.GET_CORE_OPTIONS_VERSION -> {
+                // Advertise v1 - the interface the SET_CORE_OPTIONS parser
+                // actually implements. Returning false here pushed compliant
+                // cores onto the legacy SET_VARIABLES path we never parsed.
+                data.reinterpret(4L).set(ValueLayout.JAVA_INT, 0, 1)
+                true
+            }
             RetroEnv.GET_LOG_INTERFACE -> {
                 // retro_log_callback { retro_log_printf_t log; }
                 // The function pointer goes at offset 0 of data — NOT a pointer
@@ -329,8 +366,11 @@ internal class LibretroFfm(
             }
             RetroEnv.SET_CORE_OPTIONS_INTL -> true // accept but don't parse (intl variant, niche)
             RetroEnv.SET_VARIABLES -> {
-                // older API, data = retro_variable[] (key/desc pairs)
-                true // accept but don't parse (legacy)
+                // Legacy interface: retro_variable { key*, value* }, value is
+                // "description; default". Parsed, so cores pushed here by
+                // correct version negotiation still surface their options.
+                parseLegacyVariables(data)
+                true
             }
             RetroEnv.GET_VARIABLE -> {
                 handleGetVariable(data)
@@ -378,8 +418,14 @@ internal class LibretroFfm(
     @Suppress("unused")
     fun onVideo(data: MemorySegment, width: Int, height: Int, pitch: Long) {
         if (hwRender.isActive) {
-            // HW render: data is NULL — we manually read from the FBO after retro_run
-            // (see callRunHwFrame). Skip dispatch here.
+            // HW render: data is RETRO_HW_FRAME_BUFFER_VALID (or NULL) — the
+            // useful payload is the frame's dimensions, recorded for the
+            // readback in callRunHwFrame. Dispatch happens there.
+            hwFrameValid = data.address() != 0L
+            if (hwFrameValid) {
+                hwFrameW = width
+                hwFrameH = height
+            }
             return
         }
         if (data.address() == 0L || width <= 0 || height <= 0) {
@@ -398,15 +444,17 @@ internal class LibretroFfm(
     fun callRunHwFrame(width: Int, height: Int) {
         hwRender.ensureFramebufferSize(width, height)
         hwRender.makeCurrent()
+        hwFrameValid = false
         callRun()
         hwRender.unbind()
-        val pixels = hwRender.readPixels() ?: return
-        // GL_RGBA -> matches our XRGB8888 converter (RGBA byte order, ignore alpha)
-        onVideo?.invoke(
-            MemorySegment.ofArray(pixels),
-            width, height,
-            (width * 4).toLong(),
-        )
+        // The core's per-frame dimensions when it reported a frame, else the
+        // maximums the FBO was sized to. Reading back the whole max-size FBO
+        // every frame produced oversized frames with stale regions for
+        // variable-resolution cores.
+        val w = if (hwFrameValid && hwFrameW > 0) hwFrameW else width
+        val h = if (hwFrameValid && hwFrameH > 0) hwFrameH else height
+        val pixels = hwRender.readPixels(w, h) ?: return
+        onHwVideo?.invoke(pixels, w, h)
     }
 
     @Suppress("unused")
@@ -465,7 +513,10 @@ internal class LibretroFfm(
         var offset = 0L
 
         while (true) {
-            val keySeg = data.get(ValueLayout.ADDRESS, offset)
+            // The upcall hands over a zero-length segment; every read is
+            // bounds-checked against an explicitly reinterpreted view.
+            val record = data.reinterpret(offset + defSize)
+            val keySeg = record.get(ValueLayout.ADDRESS, offset)
             if (keySeg.address() == 0L) break // NULL key = end of array
 
             val key = keySeg.reinterpret(256L).getUtf8String(0)
@@ -477,7 +528,7 @@ internal class LibretroFfm(
             val values = mutableListOf<CoreOptionValue>()
             for (i in 0 until valueCount) {
                 val valOffset = offset + valuesOffset + i * valSize
-                val valueSeg = data.get(ValueLayout.ADDRESS, valOffset)
+                val valueSeg = record.get(ValueLayout.ADDRESS, valOffset)
                 if (valueSeg.address() == 0L) break
                 val value = valueSeg.reinterpret(256L).getUtf8String(0)
                 val labelSeg = data.get(ValueLayout.ADDRESS, valOffset + 8)
@@ -507,8 +558,8 @@ internal class LibretroFfm(
     private fun handleGetVariable(data: MemorySegment): Boolean {
         if (data.address() == 0L) return false
         // retro_variable: { const char* key; const char* value; }
-        // Read the key
-        val keySeg = data.get(ValueLayout.ADDRESS, 0)
+        val view = data.reinterpret(16L)
+        val keySeg = view.get(ValueLayout.ADDRESS, 0)
         if (keySeg.address() == 0L) return false
         val key = keySeg.reinterpret(256L).getUtf8String(0)
 
@@ -517,8 +568,31 @@ internal class LibretroFfm(
 
         // Write value pointer to offset 8
         val valueSeg = arena.allocateUtf8String(value)
-        data.reinterpret(16L).set(ValueLayout.ADDRESS, 8, valueSeg)
+        view.set(ValueLayout.ADDRESS, 8, valueSeg)
         return true
+    }
+
+    // Legacy RETRO_ENVIRONMENT_SET_VARIABLES: retro_variable[]
+    // { const char* key; const char* value; } terminated by a NULL key.
+    // The legacy value packs "Description; Default" into one string.
+    private fun parseLegacyVariables(data: MemorySegment) {
+        if (data.address() == 0L) return
+        var offset = 0L
+        while (true) {
+            val record = data.reinterpret(offset + 16L)
+            val keySeg = record.get(ValueLayout.ADDRESS, offset)
+            if (keySeg.address() == 0L) break
+            val valueSeg = record.get(ValueLayout.ADDRESS, offset + 8)
+            val key = keySeg.reinterpret(256L).getUtf8String(0)
+            val raw = if (valueSeg.address() != 0L) valueSeg.reinterpret(512L).getUtf8String(0) else ""
+            val desc = raw.substringBefore("; ").ifBlank { key }
+            val default = raw.substringAfter("; ", "").ifBlank { "" }
+            coreOptions.add(CoreOption(key, desc, null, default, listOf(CoreOptionValue(default, default))))
+            if (key !in optionSelections && default.isNotBlank()) {
+                optionSelections[key] = default
+            }
+            offset += 16L
+        }
     }
 
     fun setOptionValue(key: String, value: String) {
@@ -549,10 +623,11 @@ internal class LibretroFfm(
         val structSize = 24L
         var offset = 0L
         while (true) {
-            val port = data.get(ValueLayout.JAVA_INT, offset)
-            val device = data.get(ValueLayout.JAVA_INT, offset + 4)
-            val id = data.get(ValueLayout.JAVA_INT, offset + 12)
-            val descSeg = data.get(ValueLayout.ADDRESS, offset + 16)
+            val record = data.reinterpret(offset + structSize)
+            val port = record.get(ValueLayout.JAVA_INT, offset)
+            val device = record.get(ValueLayout.JAVA_INT, offset + 4)
+            val id = record.get(ValueLayout.JAVA_INT, offset + 12)
+            val descSeg = record.get(ValueLayout.ADDRESS, offset + 16)
             if (descSeg.address() == 0L) break // terminator
             val desc = descSeg.reinterpret(128L).getUtf8String(0)
             if (port == 0 && device == 1 && desc.isNotBlank()) {
