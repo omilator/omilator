@@ -16,24 +16,28 @@ import java.lang.invoke.MethodType
 /**
  * Bridges libretro SET_HW_RENDER with our hidden GL context + FBO.
  *
- * Layout of retro_hw_render_callback on macOS arm64:
- *   0:  context_type (int)
- *   4:  major (uint)
- *   8:  minor (uint)
- *  12:  depth (bool)
- *  13:  stencil (bool)
- *  14:  cache_context (bool)
- *  16:  context_reset (fn ptr)
- *  24:  context_destroy (fn ptr)
- *  32:  get_current_framebuffer (fn ptr — frontend fills)
- *  40:  get_proc_address (fn ptr — frontend fills)
- *  48:  bottom_left_origin (bool — frontend fills)
+ * Layout of retro_hw_render_callback on a 64-bit ABI (from libretro.h):
+ *   0:  context_type (enum, 4 bytes + 4 padding)
+ *   8:  context_reset (fn ptr, core provides)
+ *  16:  get_current_framebuffer (fn ptr, frontend fills)
+ *  24:  get_proc_address (fn ptr, frontend fills)
+ *  32:  depth (bool, core provides)
+ *  33:  stencil (bool, core provides)
+ *  34:  bottom_left_origin (bool, core provides — read, not written)
+ *  36:  major_version (uint)
+ *  40:  minor_version (uint)
+ *  44:  debug_context (bool)
+ *  48:  context_destroy (fn ptr, core provides)
+ * Total size 56, but 64 is read so the whole struct is addressable.
  */
 internal class HwRenderBridge(private val arena: Arena) {
 
     private var gl: GlContext? = null
     private var contextResetHandle: MethodHandle? = null
     private var contextDestroyHandle: MethodHandle? = null
+    /** Core-declared: true means the core renders with a bottom-left origin. */
+    var bottomLeftOrigin: Boolean = false
+        private set
     private val functionProvider: FunctionProvider = GL.getFunctionProvider()
         ?: error("LWJGL function provider unavailable — GL.createCapabilities() not called")
 
@@ -44,7 +48,7 @@ internal class HwRenderBridge(private val arena: Arena) {
      */
     fun handleRequest(data: MemorySegment): Boolean {
         if (data.address() == 0L) return false
-        val sized = data.reinterpret(56L)
+        val sized = data.reinterpret(64L)
         val ctxType = sized.get(ValueLayout.JAVA_INT, 0)
         val supportedType = when (ctxType) {
             HW_CONTEXT_OPENGL, HW_CONTEXT_OPENGL_CORE,
@@ -57,8 +61,9 @@ internal class HwRenderBridge(private val arena: Arena) {
             return false
         }
 
-        val major = sized.get(ValueLayout.JAVA_INT, 4)
-        val minor = sized.get(ValueLayout.JAVA_INT, 8)
+        val major = sized.get(ValueLayout.JAVA_INT, 36)
+        val minor = sized.get(ValueLayout.JAVA_INT, 40)
+        bottomLeftOrigin = sized.get(ValueLayout.JAVA_BYTE, 34) != 0.toByte()
         println("[Omilator] SET_HW_RENDER: OpenGL ctx_type=$ctxType v$major.$minor — providing")
 
         // Step 1: create GL context
@@ -75,8 +80,8 @@ internal class HwRenderBridge(private val arena: Arena) {
 
         // Step 2: read core's function pointers
         println("[HwRender] step 2: reading core fn ptrs")
-        val resetSeg = sized.get(ValueLayout.ADDRESS, 16)
-        val destroySeg = sized.get(ValueLayout.ADDRESS, 24)
+        val resetSeg = sized.get(ValueLayout.ADDRESS, 8)
+        val destroySeg = sized.get(ValueLayout.ADDRESS, 48)
         val linker = Linker.nativeLinker()
         if (resetSeg.address() != 0L) {
             contextResetHandle = linker.downcallHandle(resetSeg, FunctionDescriptor.ofVoid())
@@ -91,9 +96,8 @@ internal class HwRenderBridge(private val arena: Arena) {
         println("[HwRender] step 3: providing get_current_framebuffer + get_proc_address")
         val getFbStub = upcallGetFramebuffer()
         val getProcStub = upcallGetProcAddress()
-        sized.set(ValueLayout.ADDRESS, 32, getFbStub)
-        sized.set(ValueLayout.ADDRESS, 40, getProcStub)
-        sized.set(ValueLayout.JAVA_BYTE, 48, 1)  // bottom_left_origin
+        sized.set(ValueLayout.ADDRESS, 16, getFbStub)
+        sized.set(ValueLayout.ADDRESS, 24, getProcStub)
 
         // Step 4: call core's context_reset — it sets up its own GL resources
         println("[HwRender] step 4: calling context_reset (core will set up GL)")
@@ -114,7 +118,20 @@ internal class HwRenderBridge(private val arena: Arena) {
     fun makeCurrent() { gl?.makeCurrent() }
     fun unbind() { gl?.unbind() }
 
-    fun readPixels(): ByteArray? = gl?.readPixelsRGBA()
+    fun readPixels(): ByteArray? {
+        val raw = gl?.readPixelsRGBA() ?: return null
+        val w = framebufferWidth()
+        val h = framebufferHeight()
+        if (bottomLeftOrigin || w <= 0 || h <= 0) return raw
+        val stride = w * 4
+        val flipped = ByteArray(raw.size)
+        for (y in 0 until h) {
+            val src = y * stride
+            val dst = (h - 1 - y) * stride
+            raw.copyInto(flipped, dst, src, src + stride)
+        }
+        return flipped
+    }
     fun framebufferWidth(): Int = gl?.width() ?: 0
     fun framebufferHeight(): Int = gl?.height() ?: 0
     val isActive: Boolean get() = gl != null
@@ -173,17 +190,14 @@ internal class HwRenderBridge(private val arena: Arena) {
     companion object {
         private const val HW_CONTEXT_NONE = 0
         private const val HW_CONTEXT_OPENGL = 1
-        private const val HW_CONTEXT_OPENGLES = 2
+        private const val HW_CONTEXT_OPENGLES2 = 2
         private const val HW_CONTEXT_OPENGL_CORE = 3
-        private const val HW_CONTEXT_OPENGLES2 = 4
-        private const val HW_CONTEXT_OPENGLES3 = 5
-        private const val HW_CONTEXT_OPENGLES_VERSION = 6
-        private const val HW_CONTEXT_VULKAN = 7
-        private const val HW_CONTEXT_D3D9 = 8
-        private const val HW_CONTEXT_D3D10 = 9
-        private const val HW_CONTEXT_D3D11 = 10
-        private const val HW_CONTEXT_D3D12 = 11
-        private const val HW_CONTEXT_METAL = 12
+        private const val HW_CONTEXT_OPENGLES3 = 4
+        private const val HW_CONTEXT_OPENGLES_VERSION = 5
+        private const val HW_CONTEXT_VULKAN = 6
+        private const val HW_CONTEXT_D3D10 = 7
+        private const val HW_CONTEXT_D3D11 = 8
+        private const val HW_CONTEXT_D3D12 = 9
         private const val HW_CONTEXT_DUMMY = 13
     }
 }

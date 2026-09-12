@@ -22,7 +22,10 @@ internal class FfmCoreController(
     private val systemDirectory: String,
 ) : CoreController {
 
-    private val arena = Arena.ofShared()
+    /** One arena per loaded core, closed in unloadCore: a single shared,
+     * never-closed arena kept every SymbolLookup and upcall stub alive after
+     * the core was supposedly gone. */
+    private var arena: Arena? = null
     private var native: LibretroFfm? = null
     private var systemInfoCache: SystemInfo? = null
     private var avInfoCache: AvInfo? = null
@@ -37,15 +40,25 @@ internal class FfmCoreController(
     override val memorySize: UInt = 0u
 
     override suspend fun loadCore(path: String): SystemInfo {
-        val n = LibretroFfm(arena, systemDirectory).apply {
-            loadCore(path)
-            installEnvironmentCallback()
-            callInit()
-            installMediaCallbacks()
-            onVideo = ::dispatchVideo
-            onAudioBatch = ::dispatchAudioBatch
-            onInputState = ::dispatchInputState
+        check(native == null) { "a core is already loaded" }
+        val newArena = Arena.ofShared()
+        val n = try {
+            LibretroFfm(newArena, systemDirectory).apply {
+                loadCore(path)
+                // Canonical order: environment AND media callbacks go in
+                // before retro_init — cores may consult callbacks during init.
+                installEnvironmentCallback()
+                installMediaCallbacks()
+                callInit()
+                onVideo = ::dispatchVideo
+                onAudioBatch = ::dispatchAudioBatch
+                onInputState = ::dispatchInputState
+            }
+        } catch (t: Throwable) {
+            newArena.close()
+            throw t
         }
+        arena = newArena
         native = n
         val (name, version, ext) = n.callSystemInfo()
         val info = SystemInfo(
@@ -110,6 +123,8 @@ internal class FfmCoreController(
         native = null
         systemInfoCache = null
         avInfoCache = null
+        arena?.close()
+        arena = null
     }
 
     override fun attach(video: VideoSink, audio: AudioSink, input: InputSource) {
@@ -158,10 +173,11 @@ internal class FfmCoreController(
     override fun getOptionSelections() = native?.optionSelections?.toMap() ?: emptyMap()
 
     private fun dispatchVideo(data: MemorySegment, width: Int, height: Int, pitch: Long) {
-        val format = when (native?.pixelFormat ?: PixelFormatC.XRGB8888) {
+        val format = when (native?.pixelFormat ?: PixelFormatC.ORGB1555) {
+            PixelFormatC.ORGB1555 -> PixelFormat.ORGB1555
             PixelFormatC.XRGB8888 -> PixelFormat.XRGB8888
             PixelFormatC.RGB565 -> PixelFormat.RGB565
-            else -> PixelFormat.XRGB8888
+            else -> PixelFormat.ORGB1555
         }
         val size = (height.toLong() * pitch).coerceAtLeast(0L).toInt()
         val bytes = if (size > 0 && data.address() != 0L) {

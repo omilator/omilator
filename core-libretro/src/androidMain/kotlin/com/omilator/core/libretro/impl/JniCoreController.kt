@@ -18,7 +18,7 @@ internal class JniCoreController : CoreController {
     private var videoSink: VideoSink? = null
     private var audioSink: AudioSink? = null
     private var inputSource: InputSource? = null
-    private var pixelFormat: Int = 1
+    private var pixelFormat: Int = 0
     private var frameCount: Int = 0
 
     override val isLoaded: Boolean get() = loaded
@@ -128,7 +128,11 @@ internal class JniCoreController : CoreController {
         val size = (height.toLong() * pitch).toInt()
         val bytes = ByteArray(size)
         copyNativeBytes(dataPtr, bytes, size)
-        val format = if (pixelFormat == 2) PixelFormat.RGB565 else PixelFormat.XRGB8888
+        val format = when (pixelFormat) {
+            1 -> PixelFormat.XRGB8888
+            2 -> PixelFormat.RGB565
+            else -> PixelFormat.ORGB1555
+        }
         frameCount++
         videoSink?.onFrame(
             Framebuffer(

@@ -22,6 +22,7 @@ internal class FrameConverter {
         ensureBuffer(width, height)
 
         when (framebuffer.format) {
+            PixelFormat.ORGB1555 -> convertORGB1555(bytes, width, height, pitch)
             PixelFormat.XRGB8888 -> convertXRGB8888(bytes, width, height, pitch)
             PixelFormat.RGB565 -> convertRGB565(bytes, width, height, pitch)
         }
@@ -58,6 +59,28 @@ internal class FrameConverter {
                 val b = bytes[src].toInt() and 0xFF
                 val g = bytes[src + 1].toInt() and 0xFF
                 val r = bytes[src + 2].toInt() and 0xFF
+                argb[destOffset + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+    }
+
+    private fun convertORGB1555(bytes: ByteArray, width: Int, height: Int, pitch: Int) {
+        val bpp = 2
+        for (y in 0 until height) {
+            val rowOffset = y * pitch
+            val destOffset = y * width
+            for (x in 0 until width) {
+                val src = rowOffset + x * bpp
+                val lo = bytes[src].toInt() and 0xFF
+                val hi = bytes[src + 1].toInt() and 0xFF
+                val packed = lo or (hi shl 8)
+                // 0RRRRRGG GGGBBBBB
+                val r5 = (packed shr 10) and 0x1F
+                val g5 = (packed shr 5) and 0x1F
+                val b5 = packed and 0x1F
+                val r = (r5 shl 3) or (r5 shr 2)
+                val g = (g5 shl 3) or (g5 shr 2)
+                val b = (b5 shl 3) or (b5 shr 2)
                 argb[destOffset + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
         }

@@ -66,7 +66,11 @@ internal val videoCb = staticCFunction { data: CPointer<ByteVar>?, width: Int, h
     if (ctrl != null && data != null && width > 0 && height > 0 && pitch > 0) {
         val size = height * pitch
         val bytes = data.readBytes(size)
-        val format = if (ctrl.pixelFormat == 2) PixelFormat.RGB565 else PixelFormat.XRGB8888
+        val format = when (ctrl.pixelFormat) {
+            1 -> PixelFormat.XRGB8888
+            2 -> PixelFormat.RGB565
+            else -> PixelFormat.ORGB1555
+        }
         ctrl.videoSink?.onFrame(Framebuffer(bytes, width.toUInt(), height.toUInt(), pitch.toUInt(), format))
     }
 }
@@ -109,7 +113,7 @@ internal val inputStateCb = staticCFunction { port: Int, device: Int, index: Int
 internal class NativeCoreController : CoreController {
     private var handle: CPointer<*>? = null
     private var loaded = false
-    internal var pixelFormat = 1
+    internal var pixelFormat = 0
     internal var videoSink: VideoSink? = null
     internal var audioSink: AudioSink? = null
     internal var inputSource: InputSource? = null

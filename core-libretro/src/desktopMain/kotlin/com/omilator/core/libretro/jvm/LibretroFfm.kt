@@ -31,7 +31,7 @@ internal class LibretroFfm(
     var onAudioBatch: ((MemorySegment, Long) -> Long)? = null
     var onInputState: ((Int, Int, Int, Int) -> Short)? = null
 
-    var pixelFormat: Int = PixelFormatC.XRGB8888
+    var pixelFormat: Int = PixelFormatC.ORGB1555
         private set
 
     /** Options declared by the core via SET_CORE_OPTIONS. */
@@ -263,7 +263,6 @@ internal class LibretroFfm(
                 true
             }
             RetroEnv.GET_LIBRETRO_PATH,
-            RetroEnv.GET_API_VERSION,
             RetroEnv.GET_INPUT_BITMASKS,
             RetroEnv.GET_AUDIO_VIDEO_ENABLE -> true
             RetroEnv.GET_LOG_INTERFACE -> {
@@ -287,26 +286,23 @@ internal class LibretroFfm(
 
             // ---- Core options ----
             RetroEnv.SET_INPUT_DESCRIPTORS -> {
-                // cmd 11: parse retro_input_descriptor array for button names
                 parseInputDescriptors(data)
                 true
             }
             RetroEnv.SET_DISK_CONTROL_INTERFACE -> true // accept but don't parse (niche)
             RetroEnv.SET_CORE_OPTIONS -> {
-                // cmd 53: data = retro_core_option_definition*
                 parseCoreOptions(data)
                 true
             }
+            RetroEnv.SET_CORE_OPTIONS_INTL -> true // accept but don't parse (intl variant, niche)
             RetroEnv.SET_VARIABLES -> {
-                // cmd 12: older API, data = retro_variable[] (key/desc pairs)
+                // older API, data = retro_variable[] (key/desc pairs)
                 true // accept but don't parse (legacy)
             }
             RetroEnv.GET_VARIABLE -> {
-                // cmd 15: data = retro_variable { key, value }
-                // Core wants the current value for an option. Read key, return stored.
                 handleGetVariable(data)
             }
-            RetroEnv.GET_VARIABLE_UPDATE -> false // no variable changes pending
+            RetroEnv.GET_VARIABLE_UPDATE -> handleVariableUpdate(data)
 
             else -> false
         }
@@ -314,7 +310,7 @@ internal class LibretroFfm(
             println("[Omilator] env cmd $cmd unhandled (declining)")
          }
          return handled
-     }
+      }
 
     @Suppress("unused")
     fun onLog(level: Int, fmt: MemorySegment) {
@@ -337,10 +333,13 @@ internal class LibretroFfm(
         RetroEnv.GET_VARIABLE_UPDATE,
         RetroEnv.GET_CORE_OPTIONS_VERSION,
         RetroEnv.SET_CORE_OPTIONS,
-        RetroEnv.GET_CORE_OPTIONS_UPDATE,
+        RetroEnv.SET_CORE_OPTIONS_INTL,
+        RetroEnv.SET_CORE_OPTIONS_DISPLAY,
         RetroEnv.SET_FRAME_TIME_CALLBACK,
         RetroEnv.SET_AUDIO_CALLBACK,
-        RetroEnv.GET_INPUT_INTERFACE,
+        RetroEnv.GET_PERF_INTERFACE,
+        RetroEnv.SET_SYSTEM_AV_INFO,
+        RetroEnv.SET_SUPPORT_NO_GAME,
     )
 
     @Suppress("unused")
@@ -417,12 +416,22 @@ internal class LibretroFfm(
         coreOptions.clear()
         if (data.address() == 0L) return
 
-        val defSize = 40L // sizeof(retro_core_option_definition)
-        val valSize = 16L // sizeof(retro_core_option_value)
+        // retro_core_option_definition (64-bit):
+        //   char* key          @ 0
+        //   char* desc         @ 8
+        //   char* info         @ 16
+        //   retro_core_option_value values[128] @ 24   (each {char* value; char* label;} = 16)
+        //   char* default_value @ 24 + 128*16 = 2072
+        // stride = 2080
+        val valuesOffset = 24L
+        val valueCount = 128
+        val valSize = 16L
+        val defaultOffset = valuesOffset + valueCount * valSize // 2072
+        val defSize = defaultOffset + 8L // 2080
+
         var offset = 0L
 
         while (true) {
-            // Read key pointer at offset 0 of current definition
             val keySeg = data.get(ValueLayout.ADDRESS, offset)
             if (keySeg.address() == 0L) break // NULL key = end of array
 
@@ -431,28 +440,27 @@ internal class LibretroFfm(
             val desc = if (descSeg.address() != 0L) descSeg.reinterpret(256L).getUtf8String(0) else key
             val infoSeg = data.get(ValueLayout.ADDRESS, offset + 16)
             val info = if (infoSeg.address() != 0L) infoSeg.reinterpret(1024L).getUtf8String(0) else null
-            val defaultSeg = data.get(ValueLayout.ADDRESS, offset + 24)
-            val defaultVal = if (defaultSeg.address() != 0L) defaultSeg.reinterpret(256L).getUtf8String(0) else ""
 
-            // Read values array
-            val valuesSeg = data.get(ValueLayout.ADDRESS, offset + 32)
             val values = mutableListOf<CoreOptionValue>()
-            if (valuesSeg.address() != 0L) {
-                var valOffset = 0L
-                while (true) {
-                    val valuePtr = valuesSeg.get(ValueLayout.ADDRESS, valOffset)
-                    if (valuePtr.address() == 0L) break
-                    val value = valuePtr.reinterpret(256L).getUtf8String(0)
-                    val labelPtr = valuesSeg.get(ValueLayout.ADDRESS, valOffset + 8)
-                    val label = if (labelPtr.address() != 0L) labelPtr.reinterpret(256L).getUtf8String(0) else value
-                    values.add(CoreOptionValue(value, label))
-                    valOffset += valSize
-                }
+            for (i in 0 until valueCount) {
+                val valOffset = offset + valuesOffset + i * valSize
+                val valueSeg = data.get(ValueLayout.ADDRESS, valOffset)
+                if (valueSeg.address() == 0L) break
+                val value = valueSeg.reinterpret(256L).getUtf8String(0)
+                val labelSeg = data.get(ValueLayout.ADDRESS, valOffset + 8)
+                val label = if (labelSeg.address() != 0L) labelSeg.reinterpret(256L).getUtf8String(0) else value
+                values.add(CoreOptionValue(value, label))
+            }
+
+            val defaultSeg = data.get(ValueLayout.ADDRESS, offset + defaultOffset)
+            val defaultVal = if (defaultSeg.address() != 0L) {
+                defaultSeg.reinterpret(256L).getUtf8String(0)
+            } else {
+                values.firstOrNull()?.value ?: ""
             }
 
             coreOptions.add(CoreOption(key, desc, info, defaultVal, values))
 
-            // Store default value if not already set
             if (key !in optionSelections) {
                 optionSelections[key] = defaultVal
             }
@@ -481,25 +489,39 @@ internal class LibretroFfm(
     }
 
     fun setOptionValue(key: String, value: String) {
-        optionSelections[key] = value
+        if (optionSelections[key] != value) {
+            optionSelections[key] = value
+            variablesDirty = true
+        }
+    }
+
+    /** Set when a UI option change lands; cleared once the core has observed it. */
+    @Volatile
+    private var variablesDirty = false
+
+    private fun handleVariableUpdate(data: MemorySegment): Boolean {
+        if (data.address() == 0L) return false
+        data.reinterpret(1L).set(ValueLayout.JAVA_BYTE, 0, if (variablesDirty) 1.toByte() else 0.toByte())
+        variablesDirty = false
+        return true
     }
 
     private fun parseInputDescriptors(data: MemorySegment) {
         inputDescriptors.clear()
         if (data.address() == 0L) return
         // retro_input_descriptor { port(u32), device(u32), index(u32), id(u32), desc(char*) }
-        // Struct size: 4+4+4+4+8 = 24 bytes (with padding to 8-byte alignment for the ptr)
-        // Actually: 4*4=16 bytes for ints, then padding to 8-byte boundary for pointer
-        // Layout: port(4) device(4) index(4) id(4) desc(8) = 24 bytes
+        // Layout: port(4) device(4) index(4) id(4) desc(8) = 24 bytes.
+        // The array is terminated by a NULL description pointer — the 0xFFFFFFFF
+        // port check used before walked past the terminator into unrelated memory.
         val structSize = 24L
         var offset = 0L
         while (true) {
             val port = data.get(ValueLayout.JAVA_INT, offset)
-            if (port == 0xFFFFFFFF.toInt()) break // terminator
             val device = data.get(ValueLayout.JAVA_INT, offset + 4)
             val id = data.get(ValueLayout.JAVA_INT, offset + 12)
             val descSeg = data.get(ValueLayout.ADDRESS, offset + 16)
-            val desc = if (descSeg.address() != 0L) descSeg.reinterpret(128L).getUtf8String(0) else ""
+            if (descSeg.address() == 0L) break // terminator
+            val desc = descSeg.reinterpret(128L).getUtf8String(0)
             if (port == 0 && device == 1 && desc.isNotBlank()) {
                 inputDescriptors["btn_$id"] = desc
             }

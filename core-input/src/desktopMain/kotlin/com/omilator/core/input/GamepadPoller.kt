@@ -4,6 +4,7 @@ import com.omilator.core.libretro.api.JoypadButton
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.glfw.GLFWGamepadState
 import org.lwjgl.system.Configuration
+import kotlin.math.abs
 
 class GamepadPoller {
 
@@ -37,7 +38,9 @@ class GamepadPoller {
     ) {
         if (!available) return
 
-        for (jid in 0 until GLFW.GLFW_JOYSTICK_LAST) {
+        // GLFW_JOYSTICK_LAST is a valid id, so the range is inclusive — an
+        // exclusive bound silently skipped the last joystick.
+        for (jid in GLFW.GLFW_JOYSTICK_1..GLFW.GLFW_JOYSTICK_LAST) {
             if (!GLFW.glfwJoystickPresent(jid)) continue
             if (!GLFW.glfwJoystickIsGamepad(jid)) continue
             if (!GLFW.glfwGetGamepadState(jid, state)) continue
@@ -57,17 +60,37 @@ class GamepadPoller {
             setButton(JoypadButton.L2, axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_TRIGGER) > 0.5f)
             setButton(JoypadButton.R2, axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER) > 0.5f)
 
-            setAnalog(0, (axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_X) * 32767f).toInt())
-            setAnalog(1, (-axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_Y) * 32767f).toInt())
-            setAnalog(2, (axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_X) * 32767f).toInt())
-            setAnalog(3, (-axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_Y) * 32767f).toInt())
+            setAnalog(0, deadzoneScale(axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_X)))
+            setAnalog(1, -deadzoneScale(axis(GLFW.GLFW_GAMEPAD_AXIS_LEFT_Y)))
+            setAnalog(2, deadzoneScale(axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_X)))
+            setAnalog(3, -deadzoneScale(axis(GLFW.GLFW_GAMEPAD_AXIS_RIGHT_Y)))
 
             return
         }
+
+        // No gamepad found: it may have just disconnected. Anything it held
+        // stays pressed forever unless cleared here.
+        for (b in listOf(
+                JoypadButton.A, JoypadButton.B, JoypadButton.X, JoypadButton.Y,
+                JoypadButton.DPAD_UP, JoypadButton.DPAD_DOWN,
+                JoypadButton.DPAD_LEFT, JoypadButton.DPAD_RIGHT,
+                JoypadButton.START, JoypadButton.SELECT,
+                JoypadButton.L, JoypadButton.R, JoypadButton.L2, JoypadButton.R2,
+            )
+        ) {
+            setButton(b, false)
+        }
+        for (i in 0 until 4) setAnalog(i, 0)
     }
 
     private fun btn(code: Int): Boolean = state.buttons(code) != 0.toByte()
     private fun axis(code: Int): Float = state.axes(code)
+
+    private fun deadzoneScale(v: Float): Int {
+        val dead = 0.15f
+        val clamped = if (abs(v) < dead) 0f else v
+        return (clamped * 32767f).toInt()
+    }
 
     fun destroy() {
         if (initialized && available) {

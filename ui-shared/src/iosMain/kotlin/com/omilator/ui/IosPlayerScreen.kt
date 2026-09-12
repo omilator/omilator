@@ -528,13 +528,22 @@ private fun Color.copy(brightness: Float): Color {
 private fun convertToArgb(bytes: ByteArray, width: Int, height: Int, pitch: Int, format: PixelFormat): IntArray? {
     if (width <= 0 || height <= 0) return null
     val argb = IntArray(width * height)
-    val bpp = if (format == PixelFormat.RGB565) 2 else 4
+    val bpp = if (format == PixelFormat.XRGB8888) 4 else 2
     for (y in 0 until height) {
         val rowOffset = y * pitch
         for (x in 0 until width) {
             val src = rowOffset + x * bpp
             if (src + bpp > bytes.size) continue
             argb[y * width + x] = when (format) {
+                PixelFormat.ORGB1555 -> {
+                    val lo = bytes[src].toInt() and 0xFF
+                    val hi = bytes[src + 1].toInt() and 0xFF
+                    val packed = lo or (hi shl 8)
+                    val r5 = (packed shr 10) and 0x1F
+                    val g5 = (packed shr 5) and 0x1F
+                    val b5 = packed and 0x1F
+                    (0xFF shl 24) or ((r5 shl 3 or (r5 shr 2)) shl 16) or ((g5 shl 3 or (g5 shr 2)) shl 8) or (b5 shl 3 or (b5 shr 2))
+                }
                 PixelFormat.RGB565 -> {
                     val lo = bytes[src].toInt() and 0xFF
                     val hi = bytes[src + 1].toInt() and 0xFF

@@ -35,12 +35,15 @@ data class Timing(
 )
 
 enum class PixelFormat(val retroId: UInt) {
-    XRGB8888(0u),
-    RGB565(1u),
+    /** libretro's default (0): 16-bit 0RGB1555. */
+    ORGB1555(0u),
+    XRGB8888(1u),
+    RGB565(2u),
     ;
 
     val bytesPerPixel: Int
         get() = when (this) {
+            ORGB1555 -> 2
             XRGB8888 -> 4
             RGB565 -> 2
         }

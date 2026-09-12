@@ -2,7 +2,6 @@ package com.omilator.ui.player
 
 import com.omilator.core.audio.AudioOutput
 import com.omilator.core.input.GamepadPoller
-import com.omilator.core.input.InputState
 import com.omilator.core.libretro.api.CoreController
 import com.omilator.core.libretro.api.Framebuffer
 import com.omilator.core.libretro.api.Geometry
@@ -16,14 +15,19 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.awt.image.BufferedImage
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
 class PlayerEngine(
@@ -31,7 +35,17 @@ class PlayerEngine(
     private val romPath: String,
     private val audioOutput: AudioOutput,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Every libretro call runs on this one thread. The core (and the hidden
+     * OpenGL context used for HW render) are thread-affine; letting load, run,
+     * save and unload hop between Dispatchers.Default workers raced retro_run
+     * against teardown and put the GL context on a thread that never owned it.
+     */
+    private val coreDispatcher = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "omilator-core").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
+
+    private val scope = CoroutineScope(SupervisorJob() + coreDispatcher)
     private val controller: CoreController = createCoreController(systemDirectory = defaultSystemDir())
     private val converter = FrameConverter()
     private val inputState = InputStateHolder()
@@ -45,14 +59,14 @@ class PlayerEngine(
     /** Speed multiplier for fast-forward (Tab) / slow-motion (Shift+Tab). */
     private var speedMultiplier: Float = 1.0f
 
-    suspend fun start() {
+    suspend fun start() = withContext(coreDispatcher) {
         _state.value = _state.value.copy(isLoading = true)
         try {
             controller.loadCore(corePath)
             val avInfo = controller.loadGame(romPath)
             controller.attach(
                 video = VideoSink { fb -> latestFrame.set(fb) },
-                audio = AudioSinkAdapter(audioOutput),
+                audio = AudioSinkAdapter(audioOutput, { volume }, { suppressAudio }),
                 input = InputSourceAdapter(inputState),
             )
             audioOutput.configure(avInfo.timing.sampleRate, channels = 2)
@@ -91,14 +105,27 @@ class PlayerEngine(
         return java.io.File(dir, "${java.io.File(romPath).nameWithoutExtension}.json")
     }
 
+    /**
+     * Joins the frame loop before touching the core: cancelling without
+     * joining let the unload below race an in-flight retro_run, and cancelling
+     * the scope first could kill the unload coroutine before it ever ran.
+     * Teardown then happens on the core thread itself.
+     */
     fun stop() {
-        frameLoop?.cancel()
+        val loop = frameLoop
         frameLoop = null
-        scope.launch {
-            runCatching { controller.unloadGame() }
-            runCatching { controller.unloadCore() }
+        runBlocking {
+            loop?.cancelAndJoin()
+            withContext(coreDispatcher) {
+                runCatching { controller.detach() }
+                runCatching { controller.unloadGame() }
+                runCatching { controller.unloadCore() }
+                runCatching { gamepadPoller.destroy() }
+                runCatching { audioOutput.release() }
+            }
         }
         scope.cancel()
+        coreDispatcher.close()
     }
 
     fun pressButton(button: Int) {
@@ -109,8 +136,9 @@ class PlayerEngine(
         inputState.release(button)
     }
 
-    fun saveState(path: String): Boolean {
-        val ok = controller.saveState(path)
+    fun saveState(path: String): Boolean = runBlocking {
+        withContext(coreDispatcher) { controller.saveState(path) }
+    }.also { ok ->
         // Also save a thumbnail of the current frame
         if (ok) {
             val frame = latestFrame.get()
@@ -122,10 +150,11 @@ class PlayerEngine(
                 } catch (_: Throwable) {}
             }
         }
-        return ok
     }
 
-    fun loadState(path: String): Boolean = controller.loadState(path)
+    fun loadState(path: String): Boolean = runBlocking {
+        withContext(coreDispatcher) { controller.loadState(path) }
+    }
 
     fun renderFrameIfAvailable(): BufferedImage? {
         val fb = latestFrame.getAndSet(null) ?: return null
@@ -141,7 +170,7 @@ class PlayerEngine(
                 setButton = { btn, pressed ->
                     if (pressed) inputState.press(btn) else inputState.release(btn)
                 },
-                setAnalog = { _, _ -> },
+                setAnalog = { index, value -> inputState.setAnalog(index, value) },
             )
 
             controller.runFrame()
@@ -149,11 +178,18 @@ class PlayerEngine(
 
             // Run-ahead: speculative extra frame for reduced input latency.
             // Display shows 1 frame ahead; state rolls back to real frame.
+            // Audio produced by the speculative frame is dropped — it belongs
+            // to a frame the rollback throws away.
             if (runAhead > 0) {
                 try {
                     val savedState = controller.saveStateToMemory()
-                    controller.runFrame()
-                    controller.loadStateFromMemory(savedState)
+                    suppressAudio = true
+                    try {
+                        controller.runFrame()
+                    } finally {
+                        suppressAudio = false
+                        controller.loadStateFromMemory(savedState)
+                    }
                 } catch (_: Throwable) {}
             }
 
@@ -189,22 +225,30 @@ class PlayerEngine(
         }
     }
 
-    fun rewindStep(): Boolean {
-        val state = rewindBuffer.pollLast() ?: return false
-        return controller.loadStateFromMemory(state)
+    fun rewindStep(): Boolean = runBlocking {
+        withContext(coreDispatcher) {
+            val state = rewindBuffer.pollLast() ?: return@withContext false
+            controller.loadStateFromMemory(state)
+        }
     }
 
     // ---- Cheats ----
-    fun applyCheat(code: String) {
-        controller.cheatReset()
-        controller.cheatSet(0, true, code.trim())
+    fun applyCheat(code: String) = runBlocking {
+        withContext(coreDispatcher) {
+            controller.cheatReset()
+            controller.cheatSet(0, true, code.trim())
+        }
+        Unit
     }
 
     // ---- Core options ----
     fun getCoreOptions() = controller.getCoreOptions()
-    fun setOptionValue(key: String, value: String) {
-        controller.setOptionValue(key, value)
+    fun setOptionValue(key: String, value: String) = runBlocking {
+        withContext(coreDispatcher) {
+            controller.setOptionValue(key, value)
+        }
         persistOptions()
+        Unit
     }
 
     // ---- Run-ahead (latency reduction) ----
@@ -212,7 +256,12 @@ class PlayerEngine(
     fun toggleRunAhead() { runAhead = if (runAhead > 0) 0 else 1 }
     fun isRunAhead(): Boolean = runAhead > 0
 
+    /** True while the speculative run-ahead frame runs; its audio is dropped. */
+    @Volatile
+    private var suppressAudio = false
+
     // ---- Audio volume ----
+    @Volatile
     private var volume: Float = 1.0f
     fun setVolume(v: Float) { volume = v.coerceIn(0f, 2f) }
     fun getVolume(): Float = volume
@@ -234,22 +283,48 @@ private fun defaultSystemDir(): String {
 
 private class InputStateHolder {
     private val buttons = IntArray(16)
+    private val analogs = IntArray(4)
 
     fun press(button: Int) { if (button in buttons.indices) buttons[button] = 1 }
     fun release(button: Int) { if (button in buttons.indices) buttons[button] = 0 }
     fun get(button: Int): Int = buttons.getOrElse(button) { 0 }
+    fun setAnalog(index: Int, value: Int) {
+        if (index in analogs.indices) analogs[index] = value.coerceIn(-32768, 32767)
+    }
+    fun analog(index: Int): Int = analogs.getOrElse(index) { 0 }
+    /** Gamepad vanished: everything it held stays stuck until cleared. */
+    fun clearAll() {
+        buttons.fill(0)
+        analogs.fill(0)
+    }
 }
 
 private class InputSourceAdapter(private val holder: InputStateHolder) : InputSource {
     override fun poll(port: Int, device: InputDevice, index: Int, id: Int): Int {
-        if (port != 0 || device != InputDevice.JOYPAD) return 0
-        return holder.get(id)
+        if (port != 0) return 0
+        return when (device) {
+            InputDevice.JOYPAD -> holder.get(id)
+            InputDevice.ANALOG -> holder.analog(index)
+            else -> 0
+        }
     }
 }
 
-private class AudioSinkAdapter(private val output: AudioOutput) : com.omilator.core.libretro.api.AudioSink {
+private class AudioSinkAdapter(
+    private val output: AudioOutput,
+    private val volume: () -> Float,
+    private val suppress: () -> Boolean,
+) : com.omilator.core.libretro.api.AudioSink {
     override fun onSamples(samples: ShortArray) {
-        output.write(samples)
+        if (suppress()) return
+        val vol = volume()
+        val scaled = if (vol == 1.0f) samples else ShortArray(samples.size) { i ->
+            (samples[i] * vol)
+                .toInt()
+                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                .toShort()
+        }
+        output.write(scaled)
     }
 }
 

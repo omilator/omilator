@@ -134,7 +134,10 @@ fun PlayerScreen(
                     return@onKeyEvent true
                 }
                 // Video scaling: press S to cycle modes
-                if (event.type == KeyEventType.KeyUp && keyCode == java.awt.event.KeyEvent.VK_S) {
+                // Cycle scaling: press V.
+                // (Was S, which is the emulated X button — its KeyUp was
+                // consumed here and X stayed pressed forever.)
+                if (event.type == KeyEventType.KeyUp && keyCode == java.awt.event.KeyEvent.VK_V) {
                     scaleMode = (scaleMode + 1) % 3
                     return@onKeyEvent true
                 }
