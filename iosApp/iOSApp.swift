@@ -47,8 +47,10 @@ struct iOSApp: App {
             NSLog("[Omilator] not a play URL")
             return
         }
-        // Strip leading slash if present (path-style)
-        if romPath.hasPrefix("/") { romPath.removeFirst() }
+        // The payload is an absolute ROM path — keep the leading slash. The
+        // old strip turned /Users/... into Users/..., which fopen then read
+        // as a path relative to the CWD.
+        if !romPath.hasPrefix("/") { romPath = "/" + romPath }
         // URL-decode
         romPath = romPath.removingPercentEncoding ?? romPath
         NSLog("[Omilator] decoded romPath='%@'", romPath)

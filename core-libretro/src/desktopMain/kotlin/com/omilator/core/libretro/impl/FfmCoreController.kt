@@ -164,6 +164,8 @@ internal class FfmCoreController(
 
     override fun readMemory(region: UInt, offset: UInt, size: UInt): ByteArray = ByteArray(size.toInt())
     override fun writeMemory(region: UInt, offset: UInt, data: ByteArray) {}
+    override fun readSaveRam(): ByteArray = native?.readSaveRam() ?: ByteArray(0)
+    override fun writeSaveRam(data: ByteArray) { native?.writeSaveRam(data) }
     override fun cheatReset() { native?.callCheatReset() }
     override fun cheatSet(index: Int, enabled: Boolean, code: String) { native?.callCheatSet(index, enabled, code) }
     override fun saveStateToMemory(): ByteArray = native?.callSerialize() ?: ByteArray(0)

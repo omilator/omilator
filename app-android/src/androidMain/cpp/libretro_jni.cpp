@@ -300,6 +300,25 @@ Java_com_omilator_core_libretro_impl_JniCoreController_systemInfoNameNative(
     return env->NewStringUTF(info.library_name ? info.library_name : "");
 }
 
+JNIEXPORT jdoubleArray JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_systemAvInfoNative(
+    JNIEnv* env, jobject) {
+    struct retro_system_av_info av{};
+    if (g_state.retro_get_system_av_info) g_state.retro_get_system_av_info(&av);
+    jdouble out[7] = {
+        (double)av.geometry.base_width,
+        (double)av.geometry.base_height,
+        (double)av.geometry.max_width,
+        (double)av.geometry.max_height,
+        (double)av.geometry.aspect_ratio,
+        av.timing.fps,
+        av.timing.sample_rate,
+    };
+    jdoubleArray arr = env->NewDoubleArray(7);
+    if (arr) env->SetDoubleArrayRegion(arr, 0, 7, out);
+    return arr;
+}
+
 JNIEXPORT jint JNICALL
 Java_com_omilator_core_libretro_impl_JniCoreController_readNativeInt(
     JNIEnv*, jobject, jlong ptr) {

@@ -21,6 +21,9 @@ import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
 import java.lang.invoke.VarHandle
 
+/** RETRO_MEMORY_SAVE_RAM — battery-backed saves. */
+private const val MEMORY_SAVE_RAM = 0
+
 internal class LibretroFfm(
     private val arena: Arena,
     private val systemDirectory: String,
@@ -125,6 +128,36 @@ internal class LibretroFfm(
             "retro_cheat_set",
             FunctionDescriptor.ofVoid(ValueLayout.JAVA_INT, ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS),
         )
+        getMemoryDataHandle = sym.down(
+            "retro_get_memory_data",
+            FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+        )
+        getMemorySizeHandle = sym.down(
+            "retro_get_memory_size",
+            FunctionDescriptor.of(ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT),
+        )
+    }
+
+    private var getMemoryDataHandle: MethodHandle? = null
+    private var getMemorySizeHandle: MethodHandle? = null
+
+    fun readSaveRam(): ByteArray {
+        val size = getMemorySizeHandle?.invoke(MEMORY_SAVE_RAM) as? Long ?: return ByteArray(0)
+        if (size <= 0L || size > 64L * 1024 * 1024) return ByteArray(0)
+        val ptr = getMemoryDataHandle?.invoke(MEMORY_SAVE_RAM) as? MemorySegment ?: return ByteArray(0)
+        if (ptr.address() == 0L) return ByteArray(0)
+        val bytes = ByteArray(size.toInt())
+        MemorySegment.copy(ptr.reinterpret(size), ValueLayout.JAVA_BYTE, 0, bytes, 0, size.toInt())
+        return bytes
+    }
+
+    fun writeSaveRam(bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        val size = getMemorySizeHandle?.invoke(MEMORY_SAVE_RAM) as? Long ?: return
+        if (size != bytes.size.toLong()) return
+        val ptr = getMemoryDataHandle?.invoke(MEMORY_SAVE_RAM) as? MemorySegment ?: return
+        if (ptr.address() == 0L) return
+        MemorySegment.copy(bytes, 0, ptr.reinterpret(size), ValueLayout.JAVA_BYTE, 0, bytes.size)
     }
 
     fun installEnvironmentCallback() {

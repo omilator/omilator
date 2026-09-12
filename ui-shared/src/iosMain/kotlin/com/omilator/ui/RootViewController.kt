@@ -21,6 +21,7 @@ import platform.Foundation.NSUserDomainMask
 import platform.Foundation.NSDocumentDirectory
 import platform.UIKit.UIViewController
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -65,7 +66,8 @@ fun RootViewController(): UIViewController {
     // Initial scan — defer to loadSettingsAndScan() when persistence is set,
     // but iOS always re-scans Documents on cold launch regardless (cheap,
     // and ROMs come/go via Files app outside our control).
-    CoroutineScope(Dispatchers.Default).launch {
+    val rootScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    rootScope.launch {
         libraryViewModel.rescan(listOf("Documents"))
     }
 
@@ -75,7 +77,7 @@ fun RootViewController(): UIViewController {
     val onDownloadCores: () -> Unit = {
         val svm = settingsViewModel
         if (!svm.state.value.coresDownloading) {
-            CoroutineScope(Dispatchers.Default).launch {
+            rootScope.launch {
                 svm.setCoresDownloading(true, "Starting...")
                 val installed = coreDownloader.downloadAll { status ->
                     svm.setCoresDownloading(true, status)

@@ -44,18 +44,21 @@ internal class JniCoreController : CoreController {
         if (!loadGameNative(romPath)) {
             throw RuntimeException("retro_load_game failed for $romPath")
         }
-        // AV info retrieval on Android happens through environment callbacks
-        // during load. We return sensible GBA defaults; the actual frame
-        // callback will report real width/height.
+        // Real values from retro_get_system_av_info — the sample rate feeds
+        // AudioTrack directly, so a hardcoded GBA figure pitched every other
+        // system wrong.
+        val av = systemAvInfoNative()
+        val fps = if (av[5] > 0.0) av[5] else 60.0
+        val rate = if (av[6] > 0.0) av[6] else 48000.0
         return AvInfo(
             geometry = Geometry(
-                baseWidth = 240u,
-                baseHeight = 160u,
-                maxWidth = 240u,
-                maxHeight = 160u,
-                aspectRatio = 1.5f,
+                baseWidth = av[0].toUInt(),
+                baseHeight = av[1].toUInt(),
+                maxWidth = av[2].toUInt(),
+                maxHeight = av[3].toUInt(),
+                aspectRatio = if (av[4] > 0.0f) av[4].toFloat() else 1.5f,
             ),
-            timing = Timing(fps = 60f, sampleRate = 65536.0),
+            timing = Timing(fps = fps.toFloat(), sampleRate = rate),
         )
     }
 
@@ -178,6 +181,7 @@ internal class JniCoreController : CoreController {
     // JNI declarations
     private external fun loadCoreNative(path: String): Boolean
     private external fun loadGameNative(path: String): Boolean
+    private external fun systemAvInfoNative(): DoubleArray
     private external fun runFrameNative()
     private external fun resetNative()
     private external fun unloadGameNative()

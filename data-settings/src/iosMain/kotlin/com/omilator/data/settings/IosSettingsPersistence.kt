@@ -12,6 +12,7 @@ import platform.posix.fseek
 import platform.posix.ftell
 import platform.posix.fread
 import platform.posix.fwrite
+import platform.posix.rename
 
 /**
  * Persistence shim that adapts Foundation file I/O to SettingsStore's
@@ -58,8 +59,12 @@ class IosSettingsPersistence(private val settingsPath: String) {
             )
         }
         val bytes = content.encodeToByteArray()
+        // Write to a sibling temp file, then rename over the target — a
+        // direct "wb" truncates in place, and a crash mid-write leaves
+        // corrupt JSON that silently resets every setting.
+        val tmpPath = "$path.tmp"
         memScoped {
-            val fp = fopen(path, "wb") ?: return@withContext
+            val fp = fopen(tmpPath, "wb") ?: return@withContext
             try {
                 val buf = allocArray<ByteVar>(bytes.size)
                 for (i in bytes.indices) buf[i] = bytes[i]
@@ -68,6 +73,7 @@ class IosSettingsPersistence(private val settingsPath: String) {
                 fclose(fp)
             }
         }
+        rename(tmpPath, path)
     }
 
     fun settingsStore(): SettingsStore = SettingsStore(

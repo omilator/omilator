@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import com.omilator.core.audio.createAudioOutputFactory
 import com.omilator.core.libretro.createCoreController
@@ -23,7 +24,7 @@ import com.omilator.ui.library.LibraryViewModel
 import com.omilator.ui.player.MobilePlayerScreen
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -75,7 +76,7 @@ class MainActivity : ComponentActivity() {
         )
 
         libraryViewModel = LibraryViewModel(
-            repository = LibraryRepository(AndroidLibraryScanner()),
+            repository = LibraryRepository(AndroidLibraryScanner(applicationContext)),
             settingsStore = settingsStore,
             settingsPath = settingsPath,
         )
@@ -90,13 +91,14 @@ class MainActivity : ComponentActivity() {
 
         // Auto-scan the app's private Documents directory on cold launch.
         // ROMs in /sdcard/Download require the SAF picker — see dirPickerLauncher.
-        GlobalScope.launch(Dispatchers.IO) {
+        lifecycleScope.launch(Dispatchers.IO) {
             libraryViewModel.rescan(listOf(File(filesDir, "Documents").absolutePath))
         }
 
         setContent {
             val rom by remember { playingRom }
             val core by remember { playingCore }
+            val downloadScope = rememberCoroutineScope()
 
             if (rom != null && core != null) {
                 // Player screen — constructed fresh per session so the core
@@ -123,17 +125,32 @@ class MainActivity : ComponentActivity() {
                     onPlayRom = { path ->
                         // Resolve core by ROM extension, check bundled first
                         // then downloaded cores.
-                        val coreName = coreNameForRom(path)
-                        val bundled = bundledCorePath(coreName)
-                        val downloaded = File(coresDir, "$coreName.so").absolutePath
-                        val resolved = bundled ?: downloaded.takeIf { File(it).exists() }
-                        if (resolved != null) {
-                            playingCore.value = resolved
-                            playingRom.value = path
+                        downloadScope.launch(Dispatchers.IO) {
+                            // SAF content:// URIs are not paths a core can
+                            // fopen — materialize the ROM into the cache dir
+                            // and play that copy.
+                            val playPath = if (path.startsWith("content://")) {
+                                runCatching {
+                                    val name = path.substringAfterLast('%').substringAfterLast('/')
+                                    val out = File(cacheDir, "rom-$name")
+                                    contentResolver.openInputStream(Uri.parse(path))?.use { input ->
+                                        out.outputStream().use { input.copyTo(it) }
+                                    } ?: return@launch
+                                    out.absolutePath
+                                }.getOrElse { return@launch }
+                            } else path
+                            val coreName = coreNameForRom(playPath)
+                            val bundled = bundledCorePath(coreName)
+                            val downloaded = File(coresDir, "$coreName.so").absolutePath
+                            val resolved = bundled ?: downloaded.takeIf { File(it).exists() }
+                            if (resolved != null) {
+                                playingCore.value = resolved
+                                playingRom.value = playPath
+                            }
                         }
                     },
                     onDownloadCores = {
-                        GlobalScope.launch(Dispatchers.IO) {
+                        downloadScope.launch(Dispatchers.IO) {
                             settingsViewModel.setCoresDownloading(true, "Starting...")
                             val installed = coreDownloader.downloadAll { status ->
                                 settingsViewModel.setCoresDownloading(true, status)

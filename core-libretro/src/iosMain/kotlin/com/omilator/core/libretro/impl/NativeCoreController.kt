@@ -14,8 +14,10 @@ import platform.posix.dlerror as _dlerror
 import platform.posix.fopen
 import platform.posix.fclose
 import platform.posix.fseek
-import platform.posix.ftell
+import platform.posix.fseeko
+import platform.posix.ftello
 import platform.posix.fread
+import platform.posix.memset
 
 @ThreadLocal
 internal var nativeControllerInstance: NativeCoreController? = null
@@ -27,12 +29,15 @@ internal var nativeHwRender: VulkanHwRender? = null
 // have stable addresses that survive the lifetime of the process —
 // retro_hw_render_callback holds raw C function pointers, not GC-able refs.
 //
-// Workaround (same as inputPollCb): 0-arg staticCFunction has overload
-// ambiguity in K/N. We declare with a dummy Int param — arm64 ABI ignores
-// extra callee params so the libretro-defined 0-arg signature still works.
-internal val hwGetFramebufferCb = staticCFunction { _: Int ->
+// 0-arg callbacks are declared as typed top-level functions and passed as
+// references: a lambda literal leaves staticCFunction's overload ambiguous,
+// and the old dummy-Int workaround called a 0-arg C function pointer
+// through a 1-arg signature — benign by accident on arm64 today, wrong on
+// any other ABI.
+private fun hwGetFramebufferImpl(): ULong =
     nativeHwRender?.currentFramebuffer() ?: 0uL
-}
+
+internal val hwGetFramebufferCb = staticCFunction(::hwGetFramebufferImpl)
 
 internal val hwGetProcAddressCb = staticCFunction { sym: CPointer<ByteVar>? ->
     val name = sym?.toKString()
@@ -92,9 +97,11 @@ internal val audioSampleCb = staticCFunction { left: Int, right: Int ->
     Unit
 }
 
-// Workaround: staticCFunction with 0 args causes overload ambiguity.
-// Declare with a dummy Int param — arm64 ABI ignores extra callee params.
-internal val inputPollCb = staticCFunction { _: Int -> }
+// 0-arg callback, typed as a function reference to avoid the lambda
+// overload ambiguity (see hwGetFramebufferCb).
+private fun inputPollImpl() {}
+
+internal val inputPollCb = staticCFunction(::inputPollImpl)
 
 internal val inputStateCb = staticCFunction { port: Int, device: Int, index: Int, id: Int ->
     if (port == 0 && device == 1) {
@@ -138,22 +145,20 @@ internal class NativeCoreController : CoreController {
         val videoPtr: COpaquePointer? = videoCb
         val audioBatchPtr: COpaquePointer? = audioBatchCb
         val audioSamplePtr: COpaquePointer? = audioSampleCb
-        // inputPoll is optional — core polls on-demand via inputState
+        val inputPollPtr: COpaquePointer? = inputPollCb
         val inputStatePtr: COpaquePointer? = inputStateCb
 
-        // Order matters: environment BEFORE init, others AFTER init
+        // Canonical order: environment AND media callbacks all go in before
+        // retro_init — a core may consult any callback during init.
         dlsym(h, "retro_set_environment")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(envPtr)
-
-        // retro_init
-        dlsym(h, "retro_init")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
-
-        // Set remaining callbacks AFTER init
-        val inputPollPtr: COpaquePointer? = inputPollCb
         dlsym(h, "retro_set_video_refresh")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(videoPtr)
         dlsym(h, "retro_set_audio_sample_batch")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(audioBatchPtr)
         dlsym(h, "retro_set_audio_sample")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(audioSamplePtr)
         dlsym(h, "retro_set_input_poll")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(inputPollPtr)
         dlsym(h, "retro_set_input_state")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(inputStatePtr)
+
+        // retro_init
+        dlsym(h, "retro_init")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
 
         // retro_get_system_info
         var name = "unknown"
@@ -174,51 +179,88 @@ internal class NativeCoreController : CoreController {
         return SystemInfo(name, version, ext.split("|").filter { it.isNotBlank() }, false, false)
     }
 
-    // Persist game info struct — must survive beyond memScoped block
-    private var gameInfoNative: NativePlacement? = null
+    // Retained native allocations for retro_game_info. The old shape wrote
+    // through readBytes() COPIES — the zero-init and the path bytes landed in
+    // throwaway Kotlin ByteArrays while the real struct stayed uninitialized
+    // — and nothing was ever freed.
+    private var gameInfoPtr: CPointer<ByteVar>? = null
+    private var gameDataPtr: CPointer<ByteVar>? = null
+    private var gamePathPtr: CPointer<ByteVar>? = null
+
+    private fun freeGameInfo() {
+        gamePathPtr?.let(nativeHeap::free)
+        gameDataPtr?.let(nativeHeap::free)
+        gameInfoPtr?.let(nativeHeap::free)
+        gamePathPtr = null
+        gameDataPtr = null
+        gameInfoPtr = null
+    }
 
     override suspend fun loadGame(romPath: String): AvInfo {
         check(loaded) { throw CoreNotLoadedException("Core not loaded") }
+        freeGameInfo()
 
-        // Allocate retro_game_info on nativeHeap, ZERO-INITIALIZED.
         // struct retro_game_info { char* path; void* data; size_t size; char* meta; } = 32 bytes
         val info = nativeHeap.allocArray<ByteVar>(32)
-        val zeroBytes = ByteArray(32)
-        zeroBytes.copyInto(info.readBytes(32))
+        memset(info, 0, 32u)
+        gameInfoPtr = info
+
+        val pathBytes = romPath.encodeToByteArray() + 0.toByte()
+        val pathPtr = nativeHeap.allocArray<ByteVar>(pathBytes.size)
+        for (i in pathBytes.indices) pathPtr[i] = pathBytes[i]
+        gamePathPtr = pathPtr
 
         // mGBA can't fopen() inside the iOS Simulator sandbox — load ROM
-        // into memory and pass data+size instead of relying on path.
-        val romBytes = readRomToBytes(romPath)
-        val dataSize = romBytes.size
-
-        if (romBytes.isNotEmpty()) {
-            // Copy ROM data to nativeHeap — write each byte, not readBytes!
-            val dataBuf = nativeHeap.allocArray<ByteVar>(dataSize)
-            for (i in 0 until dataSize) {
-                dataBuf[i] = romBytes[i]
-            }
-
-            // Set path (for metadata/display)
-            val pathBytes = romPath.encodeToByteArray() + 0.toByte()
-            val pathBuf = nativeHeap.allocArray<ByteVar>(pathBytes.size)
-            pathBytes.copyInto(pathBuf.readBytes(pathBytes.size))
-
-            // retro_game_info layout (arm64):
-            // offset 0: path (char*), offset 8: data (void*),
-            // offset 16: size (Long), offset 24: meta (char*)
-            info.reinterpret<CPointerVar<ByteVar>>()[0] = pathBuf
-            info.reinterpret<CPointerVar<ByteVar>>()[1] = dataBuf
-            info.reinterpret<LongVar>()[2] = dataSize.toLong()
+        // into memory and pass data+size instead of relying on path. One
+        // copy, straight into nativeHeap; 64-bit file size, capped.
+        val romSize = fileSizeBytes64(romPath)
+        require(romSize in 1..MAX_IN_MEMORY_ROM) {
+            "ROM is ${romSize shr 20} MB; the in-memory limit is ${MAX_IN_MEMORY_ROM shr 20} MB"
         }
+        val dataBuf = nativeHeap.allocArray<ByteVar>(romSize)
+        val fp = fopen(romPath, "rb") ?: throw RuntimeException("Cannot open ROM: $romPath")
+        try {
+            val got = fread(dataBuf, 1.toULong(), romSize.toULong(), fp)
+            if (got != romSize.toULong()) throw RuntimeException("Short read on ROM: $romPath")
+        } finally {
+            fclose(fp)
+        }
+        gameDataPtr = dataBuf
+
+        // retro_game_info layout (arm64):
+        // offset 0: path (char*), offset 8: data (void*),
+        // offset 16: size (Long), offset 24: meta (char* — left NULL)
+        info.reinterpret<CPointerVar<ByteVar>>()[0] = pathPtr
+        info.reinterpret<CPointerVar<ByteVar>>()[1] = dataBuf.reinterpret()
+        info.reinterpret<LongVar>()[2] = romSize
 
         val ok = dlsym(handle, "retro_load_game")
             ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Boolean>>()
             ?.invoke(info) ?: false
         require(ok) { "retro_load_game returned false" }
 
-        return AvInfo(
-            Geometry(240u, 160u, 240u, 160u, 1.5f),
-            Timing(60f, 32768.0),
+        return readSystemAvInfo()
+    }
+
+    /** Real values from retro_get_system_av_info; hardcoded GBA figures
+     *  pitched every other system's audio wrong. */
+    private fun readSystemAvInfo(): AvInfo = memScoped {
+        // geometry: 4 uints + float (20 bytes), pad 4, timing: 2 doubles at 24/32
+        val buf = allocArray<ByteVar>(48)
+        dlsym(handle, "retro_get_system_av_info")
+            ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Unit>>()
+            ?.invoke(buf)
+        val ints = buf.reinterpret<IntVar>()
+        val aspect = buf.reinterpret<FloatVar>()[4]
+        val doubles = buf.reinterpret<DoubleVar>()
+        val fps = doubles[3]
+        val rate = doubles[4]
+        AvInfo(
+            Geometry(
+                ints[0].toUInt(), ints[1].toUInt(), ints[2].toUInt(), ints[3].toUInt(),
+                if (aspect > 0f) aspect else 1.5f,
+            ),
+            Timing(if (fps > 0.0) fps.toFloat() else 60f, if (rate > 0.0) rate else 48000.0),
         )
     }
 
@@ -237,7 +279,7 @@ internal class NativeCoreController : CoreController {
     override fun reset() { dlsym(handle, "retro_reset")?.reinterpret<CFunction<() -> Unit>>()?.invoke() }
     override fun unloadGame() {
         dlsym(handle, "retro_unload_game")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
-        gameInfoNative = null
+        freeGameInfo()
     }
     override fun unloadCore() {
         dlsym(handle, "retro_deinit")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
@@ -327,18 +369,16 @@ internal class NativeCoreController : CoreController {
 }
 
 @OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
-private fun readRomToBytes(path: String): ByteArray = memScoped {
-    // Use POSIX fopen/fread — avoids Foundation API quirks
-    val fp = fopen(path, "rb")
-        ?: throw RuntimeException("Cannot open ROM: $path")
+private const val MAX_IN_MEMORY_ROM = 512L * 1024 * 1024
+
+@OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+private fun fileSizeBytes64(path: String): Long = memScoped {
+    val fp = fopen(path, "rb") ?: return@memScoped -1L
     try {
-        fseek(fp, 0, 2) // SEEK_END
-        val size = ftell(fp).toInt()
-        fseek(fp, 0, 0) // SEEK_SET
-        if (size <= 0) throw RuntimeException("ROM empty: $path")
-        val buf = allocArray<ByteVar>(size)
-        fread(buf, 1.toULong(), size.toULong(), fp)
-        buf.readBytes(size)
+        fseeko(fp, 0, 2) // SEEK_END
+        val size = ftello(fp)
+        fseeko(fp, 0, 0) // SEEK_SET
+        size
     } finally {
         fclose(fp)
     }

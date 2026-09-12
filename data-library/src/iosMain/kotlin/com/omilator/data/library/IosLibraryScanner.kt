@@ -11,10 +11,37 @@ import platform.Foundation.NSDirectoryEnumerationSkipsHiddenFiles
 
 class IosLibraryScanner : LibraryScanner {
     override suspend fun scan(directory: String): List<Game> = withContext(Dispatchers.Default) {
-        // On iOS, scan the app's Documents directory for ROMs.
-        // Users add ROMs via Finder > iPhone > Files > Omilator (file sharing).
-        val documentsDir = documentsDirectory() ?: return@withContext emptyList()
-        scanDirectory(documentsDir)
+        // Scan the requested directory (persisted library directories and
+        // picked subdirectories included), falling back to Documents for a
+        // bare "Documents" reference. Recursive, because ROMs arrive via the
+        // Files app in whatever folder structure the user synced.
+        val root = if (directory.isBlank() || directory == "Documents") {
+            documentsDirectory() ?: return@withContext emptyList()
+        } else {
+            directory
+        }
+        val fm = NSFileManager.defaultManager
+        val enumerator = fm.enumeratorAtPath(root)
+            ?: return@withContext emptyList()
+        val games = mutableListOf<Game>()
+        while (true) {
+            val rel = enumerator.nextObject() as? String ?: break
+            val ext = rel.substringAfterLast('.', "")
+            val system = GameSystem.detectByExtension(ext) ?: continue
+            val fullPath = "$root/$rel"
+            val attrs = fm.attributesOfItemAtPath(fullPath, null)
+            val size = (attrs?.get("NSFileSize") as? Long) ?: 0L
+            games.add(
+                Game(
+                    id = fullPath,
+                    title = cleanRomTitle(rel.substringAfterLast('/').substringBeforeLast('.')),
+                    system = system,
+                    filePath = fullPath,
+                    fileSizeBytes = size,
+                ),
+            )
+        }
+        games.sortedBy { it.title.lowercase() }
     }
 
     private fun documentsDirectory(): String? {
@@ -24,33 +51,6 @@ class IosLibraryScanner : LibraryScanner {
             true,
         )
         return paths.firstOrNull() as? String
-    }
-
-    private fun scanDirectory(dirPath: String): List<Game> {
-        val fileManager = NSFileManager.defaultManager
-        val contents = fileManager.contentsOfDirectoryAtPath(dirPath, null)
-            ?: return emptyList()
-
-        return (contents as List<String>)
-            .filter { filename ->
-                val ext = filename.substringAfterLast('.', "")
-                GameSystem.detectByExtension(ext) != null
-            }
-            .mapNotNull { filename ->
-                val ext = filename.substringAfterLast('.', "")
-                val system = GameSystem.detectByExtension(ext) ?: return@mapNotNull null
-                val fullPath = "$dirPath/$filename"
-                val attrs = fileManager.attributesOfItemAtPath(fullPath, null)
-                val size = (attrs?.get("NSFileSize") as? Long) ?: 0L
-                Game(
-                    id = fullPath,
-                    title = cleanRomTitle(filename.substringBeforeLast('.')),
-                    system = system,
-                    filePath = fullPath,
-                    fileSizeBytes = size,
-                )
-            }
-            .sortedBy { it.title.lowercase() }
     }
 }
 

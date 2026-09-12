@@ -22,6 +22,14 @@ interface CoreController {
     fun readMemory(region: UInt, offset: UInt, size: UInt): ByteArray
     fun writeMemory(region: UInt, offset: UInt, data: ByteArray)
 
+    /**
+     * Battery-backed SRAM. Defaults are empty no-ops so platform controllers
+     * can adopt them incrementally; the engine flushes before game/core
+     * unload, which is the only durable copy of battery saves.
+     */
+    fun readSaveRam(): ByteArray = ByteArray(0)
+    fun writeSaveRam(data: ByteArray) {}
+
     /** Cheats — Game Genie / Game Shark / Code Breaker codes. */
     fun cheatReset()
     /** Save/load state to/from memory (for rewind buffer). */

@@ -52,8 +52,16 @@ import com.omilator.core.libretro.api.PixelFormat
 import com.omilator.core.libretro.api.CoreController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.atomicfu.atomic
 import kotlin.math.abs
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.nanoseconds
+import kotlin.time.TimeSource
 import kotlin.math.hypot
 
 private const val DPAD_UP = 4
@@ -95,6 +103,15 @@ fun MobilePlayerScreen(
     val scope = rememberCoroutineScope()
     val buttonStates = remember { mutableStateMapOf<Int, Boolean>() }
 
+    // Input as atomics: the core thread reads these from its input callback.
+    // The old shape read the Compose SnapshotStateMap from that thread while
+    // pointer handlers on the UI thread mutated it.
+    val inputBits = remember { List(16) { atomic(0) } }
+    val press: (Int, Boolean) -> Unit = { id, pressed ->
+        if (id in inputBits.indices) inputBits[id].value = if (pressed) 1 else 0
+        if (pressed) buttonStates[id] = true else buttonStates.remove(id)
+    }
+
     remember {
         scope.launch(Dispatchers.Default) {
             try {
@@ -107,11 +124,14 @@ fun MobilePlayerScreen(
                 coreController.attach(
                     video = { fb -> latestFrame[0] = fb },
                     audio = { samples -> audioOutput.write(samples) },
-                    input = { _, _, _, id -> if (buttonStates[id] == true) 1 else 0 },
+                    input = { _, _, _, id -> if (id in inputBits.indices) inputBits[id].value else 0 },
                 )
                 isLoading = false
-                val intervalMs = (1000.0 / avInfo.timing.fps).toLong()
-                while (true) {
+                // Nanosecond deadlines: (1000/fps).toLong() truncated 60 Hz
+                // to 16 ms and overdrives the core by ~2.5%.
+                val intervalNanos = (1_000_000_000.0 / avInfo.timing.fps).toLong()
+                var deadline = TimeSource.Monotonic.markNow()
+                while (currentCoroutineContext().isActive) {
                     coreController.runFrame()
                     latestFrame[0]?.let { fb ->
                         (fb.data as? ByteArray)?.let { bytes ->
@@ -122,13 +142,24 @@ fun MobilePlayerScreen(
                             }
                         }
                     }
-                    delay(intervalMs)
+                    deadline += intervalNanos.nanoseconds
+                    val remaining = deadline - TimeSource.Monotonic.markNow()
+                    if (remaining > Duration.ZERO) delay(remaining.inWholeMilliseconds)
+                    else deadline = TimeSource.Monotonic.markNow()
                 }
             } catch (e: Exception) {
                 error = e.message ?: e::class.simpleName
                 isLoading = false
             } finally {
-                audioOutput.release()
+                // NonCancellable: leaving the screen cancels this coroutine,
+                // and the core MUST still be unloaded rather than left
+                // running with dangling callbacks.
+                withContext(NonCancellable + Dispatchers.Default) {
+                    runCatching { coreController.detach() }
+                    runCatching { coreController.unloadGame() }
+                    runCatching { coreController.unloadCore() }
+                    runCatching { audioOutput.release() }
+                }
             }
         }
         true
@@ -190,7 +221,7 @@ fun MobilePlayerScreen(
                             }
                         }
                     }
-                    ControllerBar(buttonStates)
+                    ControllerBar(buttonStates, press)
                 }
                 ExitButton(onExit)
             }
@@ -216,7 +247,7 @@ private fun ExitButton(onExit: () -> Unit) {
 // === CONTROLLER ===
 
 @Composable
-private fun ControllerBar(buttonStates: MutableMap<Int, Boolean>) {
+private fun ControllerBar(buttonStates: MutableMap<Int, Boolean>, press: (Int, Boolean) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -226,26 +257,26 @@ private fun ControllerBar(buttonStates: MutableMap<Int, Boolean>) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        DpadSection(buttonStates)
+        DpadSection(press)
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            SmallButton("SELECT", Color(0xFF48484A), buttonStates, 2)
-            SmallButton("START", Color(0xFF48484A), buttonStates, 3)
+            SmallButton("SELECT", Color(0xFF48484A), press, 2)
+            SmallButton("START", Color(0xFF48484A), press, 3)
         }
         Column(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            ActionButton("A", Color(0xFF5856D6), buttonStates, 8)
-            ActionButton("B", Color(0xFFFF2D55), buttonStates, 0)
+            ActionButton("A", Color(0xFF5856D6), press, 8)
+            ActionButton("B", Color(0xFFFF2D55), press, 0)
         }
     }
 }
 
 @Composable
-private fun DpadSection(buttonStates: MutableMap<Int, Boolean>) {
+private fun DpadSection(press: (Int, Boolean) -> Unit) {
     var activeDirection by remember { mutableStateOf<Int?>(null) }
 
     Box(
@@ -259,7 +290,7 @@ private fun DpadSection(buttonStates: MutableMap<Int, Boolean>) {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     down.consume()
                     var current = directionFromOffset(down.position, cx, cy, deadzonePx)
-                    applyDirection(current, null, buttonStates)
+                    applyDirection(current, null, press)
                     activeDirection = current
                     var pointerInside = true
                     while (true) {
@@ -267,7 +298,7 @@ private fun DpadSection(buttonStates: MutableMap<Int, Boolean>) {
                         val change = event.changes.firstOrNull { it.id == down.id } ?: continue
                         change.consume()
                         if (!change.pressed) {
-                            applyDirection(null, current, buttonStates)
+                            applyDirection(null, current, press)
                             activeDirection = null
                             break
                         }
@@ -276,7 +307,7 @@ private fun DpadSection(buttonStates: MutableMap<Int, Boolean>) {
                         if (inside != pointerInside || newDir != current) {
                             pointerInside = inside
                             if (newDir != current) {
-                                applyDirection(newDir, current, buttonStates)
+                                applyDirection(newDir, current, press)
                                 current = newDir
                                 activeDirection = newDir
                             }
@@ -350,7 +381,7 @@ private fun DpadCell(arrow: String, dir: Int, activeDirection: Int?) {
 private fun ActionButton(
     label: String,
     color: Color,
-    buttonStates: MutableMap<Int, Boolean>,
+    press: (Int, Boolean) -> Unit,
     buttonId: Int,
 ) {
     var pressed by remember { mutableStateOf(false) }
@@ -380,7 +411,7 @@ private fun ActionButton(
                     ),
                 )
             )
-            .pressable(buttonId, buttonStates) { pressed = it },
+            .pressable(buttonId) { p -> pressed = p; press(buttonId, p) },
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -391,7 +422,7 @@ private fun ActionButton(
 private fun SmallButton(
     label: String,
     color: Color,
-    buttonStates: MutableMap<Int, Boolean>,
+    press: (Int, Boolean) -> Unit,
     buttonId: Int,
 ) {
     var pressed by remember { mutableStateOf(false) }
@@ -418,7 +449,7 @@ private fun SmallButton(
                     ),
                 )
             )
-            .pressable(buttonId, buttonStates) { pressed = it },
+            .pressable(buttonId) { p -> pressed = p; press(buttonId, p) },
         contentAlignment = Alignment.Center,
     ) {
         Text(label, color = Color.White.copy(alpha = if (pressed) 0.9f else 0.6f), fontSize = 9.sp, fontWeight = FontWeight.Medium)
@@ -429,26 +460,18 @@ private fun SmallButton(
 
 private fun Modifier.pressable(
     buttonId: Int,
-    buttonStates: MutableMap<Int, Boolean>,
     onChange: (Boolean) -> Unit,
 ): Modifier = this.pointerInput(buttonId) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
         down.consume()
         onChange(true)
-        buttonStates[buttonId] = true
         while (true) {
             val event = awaitPointerEvent()
             val change = event.changes.firstOrNull { it.id == down.id } ?: continue
             change.consume()
-            if (!change.pressed) {
+            if (!change.pressed || !isInside(change.position, size)) {
                 onChange(false)
-                buttonStates[buttonId] = false
-                break
-            }
-            if (!isInside(change.position, size)) {
-                onChange(false)
-                buttonStates[buttonId] = false
                 break
             }
         }
@@ -460,9 +483,9 @@ private fun isInside(position: Offset, size: IntSize): Boolean {
         position.x <= size.width && position.y <= size.height
 }
 
-private fun applyDirection(newDir: Int?, oldDir: Int?, buttonStates: MutableMap<Int, Boolean>) {
-    if (oldDir != null && oldDir != newDir) buttonStates[oldDir] = false
-    if (newDir != null && newDir != oldDir) buttonStates[newDir] = true
+private fun applyDirection(newDir: Int?, oldDir: Int?, press: (Int, Boolean) -> Unit) {
+    if (oldDir != null && oldDir != newDir) press(oldDir, false)
+    if (newDir != null && newDir != oldDir) press(newDir, true)
 }
 
 // === HELPERS ===

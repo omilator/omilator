@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 class DesktopSettingsPersistence(private val configDir: String) {
     val settingsFile: File
@@ -19,7 +20,21 @@ class DesktopSettingsPersistence(private val configDir: String) {
     }
 
     suspend fun write(path: String, content: String) = withContext(Dispatchers.IO) {
-        File(path).writeText(content)
+        // Atomic replace: a direct writeText truncates in place, and a crash
+        // mid-write leaves corrupt JSON that silently resets every setting.
+        val target = Paths.get(path)
+        val temp = target.resolveSibling(target.fileName.toString() + ".tmp")
+        Files.writeString(temp, content)
+        try {
+            Files.move(
+                temp,
+                target,
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 
     fun settingsStore(): SettingsStore = SettingsStore(

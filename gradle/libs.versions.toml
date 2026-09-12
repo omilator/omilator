@@ -10,6 +10,7 @@ serialization = "1.7.3"
 datetime = "0.6.1"
 skie = "0.9.3"
 kermit = "2.0.4"
+atomicfu = "0.25.0"
 lwjgl = "3.3.4"
 
 [libraries]
@@ -25,9 +26,11 @@ androidx-activity-compose = { module = "androidx.activity:activity-compose", ver
 androidx-lifecycle-viewmodel-compose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidx-lifecycle" }
 androidx-lifecycle-runtime-compose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose", version.ref = "androidx-lifecycle" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidx-core" }
+androidx-documentfile = { module = "androidx.documentfile:documentfile", version = "1.0.1" }
 
 # Logging
 touchlab-kermit = { module = "co.touchlab:kermit", version.ref = "kermit" }
+kotlinx-atomicfu = { module = "org.jetbrains.kotlinx:atomicfu", version.ref = "atomicfu" }
 
 # LWJGL (desktop HW render — libretro SET_HW_RENDER integration)
 lwjgl = { module = "org.lwjgl:lwjgl", version.ref = "lwjgl" }

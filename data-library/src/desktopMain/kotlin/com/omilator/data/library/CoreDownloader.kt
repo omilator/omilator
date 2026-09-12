@@ -30,11 +30,25 @@ class CoreDownloader(private val targetDir: File) {
         CoreEntry("ppsspp_libretro", "PSP"),
     )
 
-    private val buildbotBase = "https://buildbot.libretro.com/nightly/apple/osx/arm64/latest"
+    /** Platform-specific buildbot coordinates for the current desktop OS. */
+    private data class Platform(val buildbotPath: String, val coreExt: String)
 
-    /** Returns true if a core .dylib already exists in targetDir. */
+    private val platform: Platform = run {
+        val os = System.getProperty("os.name").lowercase()
+        val arch = System.getProperty("os.arch")
+        when {
+            os.contains("win") -> Platform("windows/x86_64", "dll")
+            os.contains("linux") -> Platform("linux/x86_64", "so")
+            arch == "aarch64" || arch == "arm64" -> Platform("apple/osx/arm64", "dylib")
+            else -> Platform("apple/osx/x86_64", "dylib")
+        }
+    }
+
+    private val buildbotBase = "https://buildbot.libretro.com/nightly/${platform.buildbotPath}/latest"
+
+    /** Returns true if a core library already exists in targetDir. */
     fun isInstalled(entry: CoreEntry): Boolean =
-        File(targetDir, "${entry.name}.dylib").exists()
+        File(targetDir, "${entry.name}.${platform.coreExt}").exists()
 
     /** Count of installed cores. */
     fun installedCount(): Int = cores.count { isInstalled(it) }
@@ -44,15 +58,15 @@ class CoreDownloader(private val targetDir: File) {
      * Call from Dispatchers.IO. Calls [onProgress] with status text.
      */
     fun download(entry: CoreEntry, onProgress: (String) -> Unit = {}): Boolean {
-        val dylibName = "${entry.name}.dylib"
-        val existingFile = File(targetDir, dylibName)
+        val libName = "${entry.name}.${platform.coreExt}"
+        val existingFile = File(targetDir, libName)
         if (existingFile.exists()) {
-            onProgress("$dylibName already installed")
+            onProgress("$libName already installed")
             return true
         }
 
-        val zipUrl = "$buildbotBase/${entry.name}.dylib.zip"
-        onProgress("Downloading $dylibName...")
+        val zipUrl = "$buildbotBase/${entry.name}_${platform.coreExt}.zip"
+        onProgress("Downloading $libName...")
         return try {
             targetDir.mkdirs()
             val conn = URL(zipUrl).openConnection() as HttpURLConnection
@@ -66,10 +80,10 @@ class CoreDownloader(private val targetDir: File) {
             ZipInputStream(conn.inputStream).use { zis ->
                 var entry2 = zis.nextEntry
                 while (entry2 != null) {
-                    if (entry2.name.endsWith(".dylib")) {
+                    if (entry2.name.endsWith(".${platform.coreExt}")) {
                         val outFile = File(targetDir, File(entry2.name).name)
                         outFile.outputStream().use { output -> zis.copyTo(output) }
-                        onProgress("Installed $dylibName (${outFile.length() / 1024}KB)")
+                        onProgress("Installed $libName (${outFile.length() / 1024}KB)")
                         conn.disconnect()
                         return true
                     }

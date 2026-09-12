@@ -16,6 +16,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -167,6 +168,7 @@ fun main() = application {
                 }
             }
         } else {
+            val appScope = rememberCoroutineScope()
             OmilatorApp(
                 libraryViewModel = libraryViewModel,
                 settingsViewModel = settingsViewModel,
@@ -180,7 +182,7 @@ fun main() = application {
                     pickRomFile()?.let { path -> launchStandalone(path) }
                 },
                 onDownloadCores = {
-                    GlobalScope.launch(Dispatchers.IO) {
+                    appScope.launch(Dispatchers.IO) {
                         val downloader = CoreDownloader(coresDir)
                         settingsViewModel.setCoresDownloading(true, "Starting...")
                         settingsViewModel.setCoresStatus(downloader.installedCount(), downloader.cores.size)
@@ -193,7 +195,7 @@ fun main() = application {
                 },
                 onOpenGameSettings = { romPath -> openGameSettings(romPath) },
                 onDownloadEmulators = {
-                    GlobalScope.launch(Dispatchers.IO) {
+                    appScope.launch(Dispatchers.IO) {
                         val installer = EmulatorInstaller()
                         settingsViewModel.setEmulatorsStatus(installer.installedCount(), installer.emulators.size)
                         settingsViewModel.setEmulatorsDownloading(true, "Starting...")

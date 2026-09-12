@@ -30,8 +30,14 @@ kotlin {
             dependencies {
                 implementation("org.lwjgl:lwjgl:3.3.4")
                 implementation("org.lwjgl:lwjgl-glfw:3.3.4")
-                runtimeOnly("org.lwjgl:lwjgl:3.3.4:natives-macos-arm64")
-                runtimeOnly("org.lwjgl:lwjgl-glfw:3.3.4:natives-macos-arm64")
+                val lwjglNatives = when {
+                    org.gradle.internal.os.OperatingSystem.current().isWindows -> "natives-windows"
+                    org.gradle.internal.os.OperatingSystem.current().isLinux -> "natives-linux"
+                    System.getProperty("os.arch") == "aarch64" -> "natives-macos-arm64"
+                    else -> "natives-macos"
+                }
+                runtimeOnly("org.lwjgl:lwjgl:3.3.4:$lwjglNatives")
+                runtimeOnly("org.lwjgl:lwjgl-glfw:3.3.4:$lwjglNatives")
             }
         }
         commonTest.dependencies {

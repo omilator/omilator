@@ -111,19 +111,19 @@ class SettingsViewModel(
     /**
      * Persist the current theme + API key + libraryDirectories to the
      * SettingsStore. No-op if no store/path was provided (legacy callers).
+     * A read-modify-write copy, so fields this screen does not own survive.
      */
     private fun persist() {
         val store = settingsStore ?: return
         val s = _state.value
         scope.launch {
-            store.saveAppSettings(
-                AppSettings(
+            store.updateAppSettings(settingsPath) {
+                it.copy(
                     theme = s.theme,
                     libraryDirectories = s.libraryDirectories,
                     theGamesDbApiKey = s.theGamesDbApiKey,
-                ),
-                settingsPath,
-            )
+                )
+            }
         }
     }
 }

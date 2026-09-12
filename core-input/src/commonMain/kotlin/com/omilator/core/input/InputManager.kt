@@ -11,11 +11,11 @@ class InputState {
     private val analogs = IntArray(4)
 
     fun setButton(button: Int, pressed: Boolean) {
-        buttons[button] = if (pressed) 1 else 0
+        if (button in buttons.indices) buttons[button] = if (pressed) 1 else 0
     }
 
     fun setAnalog(index: Int, value: Int) {
-        analogs[index] = value
+        if (index in analogs.indices) analogs[index] = value.coerceIn(-32768, 32767)
     }
 
     fun button(button: Int): Int = buttons.getOrElse(button) { 0 }
@@ -25,6 +25,13 @@ class InputState {
         buttons.fill(0)
         analogs.fill(0)
     }
+
+    fun copy(): InputState {
+        val next = InputState()
+        buttons.copyInto(next.buttons)
+        analogs.copyInto(next.analogs)
+        return next
+    }
 }
 
 class InputManager : InputSource {
@@ -32,7 +39,11 @@ class InputManager : InputSource {
     val state: StateFlow<InputState> = _state
 
     fun update(transform: InputState.() -> Unit) {
-        _state.value.apply(transform)
+        // Mutate a copy, not the current value: assigning the same instance
+        // back compares equal to itself and StateFlow suppresses the emission.
+        val next = _state.value.copy()
+        next.transform()
+        _state.value = next
     }
 
     fun press(button: Int) = update { setButton(button, true) }

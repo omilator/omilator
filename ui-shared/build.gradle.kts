@@ -41,6 +41,7 @@ kotlin {
             implementation(compose.components.resources)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.datetime)
+            implementation(libs.kotlinx.atomicfu)
 
             // API deps — exported into the UiShared.framework for iOS
             api(project(":core-libretro"))

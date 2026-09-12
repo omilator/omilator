@@ -5,6 +5,7 @@ package com.omilator.core.audio
 import kotlinx.cinterop.*
 import platform.AVFAudio.*
 import platform.Foundation.NSLog
+import platform.Foundation.NSLock
 import platform.Foundation.NSError
 
 class IosAudioOutput : AudioOutput {
@@ -18,6 +19,15 @@ class IosAudioOutput : AudioOutput {
     private var srcFormat: AVAudioFormat? = null
     private var started = false
     private var pendingBuffers: Int = 0
+
+    /**
+     * pendingBuffers is touched from the core thread (write), the audio
+     * completion callbacks, and flush() — a plain Int is a data race, and a
+     * stale count after flush() left the cap permanently saturated. The lock
+     * plus generation invalidates completion callbacks from before a flush.
+     */
+    private val pendingLock = NSLock()
+    private var generation = 0L
     private var firstBufferLogged = false
 
     override fun configure(sampleRate: Double, channels: Int) {
@@ -81,7 +91,11 @@ class IosAudioOutput : AudioOutput {
         // Backpressure: cap queued buffers so a stalled engine can't grow
         // memory unbounded. Drop new input until something drains. Torn read
         // is harmless — at worst we drop or queue one extra batch.
-        if (pendingBuffers >= MAX_PENDING) return samples.size
+        val myGeneration = pendingLock.withLock {
+            if (pendingBuffers >= MAX_PENDING) return samples.size
+            pendingBuffers++
+            generation
+        }
 
         val frames = samples.size / channels
         if (frames == 0) return samples.size
@@ -108,19 +122,28 @@ class IosAudioOutput : AudioOutput {
             }
         }
 
-        pendingBuffers++
         if (!firstBufferLogged) {
             firstBufferLogged = true
             NSLog("[Audio] first buffer scheduled: $frames frames")
         }
         node.scheduleBuffer(buffer) {
-            pendingBuffers--
+            pendingLock.withLock {
+                if (myGeneration == generation) {
+                    pendingBuffers = (pendingBuffers - 1).coerceAtLeast(0)
+                }
+            }
         }
         return samples.size
     }
 
     override fun flush() {
-        // Drop queued buffers (used by rewind / run-ahead).
+        // Drop queued buffers (used by rewind / run-ahead). Bumping the
+        // generation first means completion callbacks already in flight
+        // decrement nothing; the counter is reset here, not by them.
+        pendingLock.withLock {
+            generation++
+            pendingBuffers = 0
+        }
         playerNode?.reset()
     }
 
@@ -153,5 +176,14 @@ class IosAudioOutput : AudioOutput {
         // ~8 batches at 60fps = ~130ms of buffer. Enough jitter slack without
         // being a latency sink.
         const val MAX_PENDING = 8
+    }
+}
+
+private inline fun <T> platform.Foundation.NSLock.withLock(block: () -> T): T {
+    lock()
+    try {
+        return block()
+    } finally {
+        unlock()
     }
 }

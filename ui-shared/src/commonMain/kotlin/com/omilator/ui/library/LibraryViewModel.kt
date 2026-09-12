@@ -99,10 +99,7 @@ class LibraryViewModel(
     private fun persistSettings(directories: List<String>) {
         val store = settingsStore ?: return
         scope.launch {
-            store.saveAppSettings(
-                AppSettings(libraryDirectories = directories),
-                settingsPath,
-            )
+            store.updateAppSettings(settingsPath) { it.copy(libraryDirectories = directories) }
         }
     }
 }

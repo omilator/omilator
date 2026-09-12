@@ -72,11 +72,33 @@ class PlayerEngine(
             audioOutput.configure(avInfo.timing.sampleRate, channels = 2)
             gamepadPoller.init()
             loadPersistedOptions()  // Apply saved core options for this ROM
+            restoreSram()
             _state.value = _state.value.copy(isLoading = false, geometry = avInfo.geometry, fps = avInfo.timing.fps)
             frameLoop = scope.launch { runLoop(avInfo.timing.fps) }
         } catch (t: Throwable) {
             _state.value = _state.value.copy(isLoading = false, error = "${t::class.simpleName}: ${t.message}")
         }
+    }
+
+    /** Battery saves live in the core's SRAM block; without this round-trip
+     *  every exit threw away everything since the last flush. */
+    private fun restoreSram() {
+        val f = sramFile()
+        if (!f.exists()) return
+        runCatching { controller.writeSaveRam(f.readBytes()) }
+    }
+
+    private fun flushSram() {
+        runCatching {
+            val data = controller.readSaveRam()
+            if (data.isNotEmpty()) sramFile().writeBytes(data)
+        }
+    }
+
+    private fun sramFile(): java.io.File {
+        val dir = java.io.File(System.getProperty("user.home"),
+            "Library/Application Support/Omilator/saves").apply { mkdirs() }
+        return java.io.File(dir, "${java.io.File(romPath).nameWithoutExtension}.srm")
     }
 
     private fun loadPersistedOptions() {
@@ -118,6 +140,7 @@ class PlayerEngine(
             loop?.cancelAndJoin()
             withContext(coreDispatcher) {
                 runCatching { controller.detach() }
+                runCatching { flushSram() }
                 runCatching { controller.unloadGame() }
                 runCatching { controller.unloadCore() }
                 runCatching { gamepadPoller.destroy() }

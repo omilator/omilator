@@ -28,11 +28,30 @@ enum class GameSystem(
     SATURN("Sega Saturn", "Sega", 1994, listOf("cue", "iso", "bin", "chd", "m3u"), "mednafen_saturn");
 
     companion object {
+        /** All systems that claim an extension (bin/iso/cue/chd/elf and
+         *  friends are claimed by several). */
+        fun candidatesByExtension(extension: String): List<GameSystem> {
+            val ext = extension.lowercase()
+            return entries.filter { sys -> sys.extensions.any { it.equals(ext, ignoreCase = true) } }
+        }
+
+        /** Documented resolutions for extensions several systems share.
+         *  Without this, entry order picked the winner silently — the comment
+         *  said PS1 for .iso while the enum order answered PSP. */
+        private val sharedExtensionPreference = mapOf(
+            "iso" to PLAYSTATION,
+            "bin" to PLAYSTATION,
+            "chd" to PLAYSTATION,
+            "m3u" to PLAYSTATION,
+            "cue" to PLAYSTATION,
+            "elf" to PSP,
+            "app" to NINTENDO_3DS,
+            "ciso" to GAMECUBE,
+        )
+
         fun detectByExtension(extension: String): GameSystem? {
             val ext = extension.lowercase()
-            // Prefer the most specific match. PSP .iso and GameCube .iso and PS1 .iso
-            // all collide on the iso extension, so iso resolves to the most likely
-            // (PS1) — callers can override by passing a different file in a system dir.
+            sharedExtensionPreference[ext]?.let { return it }
             return entries.firstOrNull { sys -> sys.extensions.any { it.equals(ext, ignoreCase = true) } }
         }
     }
