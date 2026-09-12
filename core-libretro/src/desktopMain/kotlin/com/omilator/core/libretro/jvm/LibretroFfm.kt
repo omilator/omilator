@@ -365,12 +365,17 @@ internal class LibretroFfm(
                 true
             }
             RetroEnv.SET_CORE_OPTIONS_INTL -> {
-                // retro_core_options_intl: the US definitions array at
-                // offset 0, followed by per-locale pointers. v1-negotiating
-                // cores with intl helpers reach this command; acknowledging
-                // it without parsing stored no definitions at all. The US
-                // section is laid out exactly like SET_CORE_OPTIONS.
-                parseCoreOptions(data)
+                // retro_core_options_intl is a WRAPPER: { definitions *us;
+                // definitions *local; }. The US pointer at offset 0 leads to
+                // an array laid out exactly like SET_CORE_OPTIONS - parsing
+                // the wrapper itself read the wrapper's pointer fields as
+                // option keys.
+                if (data.address() != 0L) {
+                    val us = data.reinterpret(16L).get(ValueLayout.ADDRESS, 0)
+                    if (us.address() != 0L) {
+                        parseCoreOptions(us)
+                    }
+                }
                 true
             }
             RetroEnv.SET_VARIABLES -> {
@@ -528,9 +533,9 @@ internal class LibretroFfm(
             if (keySeg.address() == 0L) break // NULL key = end of array
 
             val key = keySeg.reinterpret(256L).getUtf8String(0)
-            val descSeg = data.get(ValueLayout.ADDRESS, offset + 8)
+            val descSeg = record.get(ValueLayout.ADDRESS, offset + 8)
             val desc = if (descSeg.address() != 0L) descSeg.reinterpret(256L).getUtf8String(0) else key
-            val infoSeg = data.get(ValueLayout.ADDRESS, offset + 16)
+            val infoSeg = record.get(ValueLayout.ADDRESS, offset + 16)
             val info = if (infoSeg.address() != 0L) infoSeg.reinterpret(1024L).getUtf8String(0) else null
 
             val values = mutableListOf<CoreOptionValue>()
@@ -539,12 +544,12 @@ internal class LibretroFfm(
                 val valueSeg = record.get(ValueLayout.ADDRESS, valOffset)
                 if (valueSeg.address() == 0L) break
                 val value = valueSeg.reinterpret(256L).getUtf8String(0)
-                val labelSeg = data.get(ValueLayout.ADDRESS, valOffset + 8)
+                val labelSeg = record.get(ValueLayout.ADDRESS, valOffset + 8)
                 val label = if (labelSeg.address() != 0L) labelSeg.reinterpret(256L).getUtf8String(0) else value
                 values.add(CoreOptionValue(value, label))
             }
 
-            val defaultSeg = data.get(ValueLayout.ADDRESS, offset + defaultOffset)
+            val defaultSeg = record.get(ValueLayout.ADDRESS, offset + defaultOffset)
             val defaultVal = if (defaultSeg.address() != 0L) {
                 defaultSeg.reinterpret(256L).getUtf8String(0)
             } else {
@@ -570,12 +575,23 @@ internal class LibretroFfm(
         // retro_variable: { const char* key; const char* value; }
         val view = data.reinterpret(16L)
         val keySeg = view.get(ValueLayout.ADDRESS, 0)
-        if (keySeg.address() == 0L) return true
+        // Cores reuse one retro_variable struct: a stale value pointer from
+        // a previous query must be overwritten explicitly, or the wrong
+        // value stays visible for the unknown key.
+        if (keySeg.address() == 0L) {
+            view.set(ValueLayout.ADDRESS, 8, MemorySegment.NULL)
+            return true
+        }
         val key = keySeg.reinterpret(256L).getUtf8String(0)
 
-        // Unknown variable: value stays NULL (the core uses its default),
-        // and the command still reports the interface as supported.
-        val value = optionSelections[key] ?: return true
+        // Unknown variable: value is explicitly NULL (the core uses its
+        // default), and the command still reports the interface as
+        // supported.
+        val value = optionSelections[key]
+        if (value == null) {
+            view.set(ValueLayout.ADDRESS, 8, MemorySegment.NULL)
+            return true
+        }
 
         // Write value pointer to offset 8
         val valueSeg = arena.allocateUtf8String(value)
