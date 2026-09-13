@@ -57,6 +57,8 @@ data class SettingsUiState(
     val emulatorsDownloading: Boolean = false,
     val emulatorsStatus: String = "",
     val theGamesDbApiKey: String = "",
+    val libtecaServerUrl: String = "",
+    val libtecaServerToken: String = "",
 )
 
 class SettingsViewModel(
@@ -108,6 +110,11 @@ class SettingsViewModel(
         persist()
     }
 
+    fun setLibtecaServer(url: String, token: String) {
+        _state.value = _state.value.copy(libtecaServerUrl = url, libtecaServerToken = token)
+        persist()
+    }
+
     /**
      * Persist the current theme + API key + libraryDirectories to the
      * SettingsStore. No-op if no store/path was provided (legacy callers).
@@ -122,6 +129,8 @@ class SettingsViewModel(
                     theme = s.theme,
                     libraryDirectories = s.libraryDirectories,
                     theGamesDbApiKey = s.theGamesDbApiKey,
+                    libtecaServerUrl = s.libtecaServerUrl,
+                    libtecaServerToken = s.libtecaServerToken,
                 )
             }
         }
@@ -282,6 +291,33 @@ fun SettingsScreen(
                     ) {
                         Text(if (state.emulatorsDownloading) "Downloading..." else "Download missing emulators")
                     }
+                }
+            }
+        }
+
+        if (isDesktop) item {
+            SettingsCard(title = "Libteca server") {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Connect to a libteca games library to browse and download ROMs",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = state.libtecaServerUrl,
+                        onValueChange = { viewModel.setLibtecaServer(it, state.libtecaServerToken) },
+                        placeholder = { Text("http://your-server:8096") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = state.libtecaServerToken,
+                        onValueChange = { viewModel.setLibtecaServer(state.libtecaServerUrl, it) },
+                        placeholder = { Text("API token") },
+                        singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }

@@ -15,6 +15,8 @@ data class AppSettings(
     val audioLatencyMillis: Int = 50,
     val vsyncEnabled: Boolean = true,
     val theGamesDbApiKey: String = "",
+    val libtecaServerUrl: String = "",
+    val libtecaServerToken: String = "",
 ) {
     companion object {
         val DEFAULT = AppSettings()
