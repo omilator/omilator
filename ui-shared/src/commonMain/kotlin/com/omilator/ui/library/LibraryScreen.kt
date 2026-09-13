@@ -77,11 +77,17 @@ fun LibraryScreen(
     showTitle: Boolean = true,
     showRefresh: Boolean = true,
     showQuickPlay: Boolean = true,
+    serverPage: (@Composable () -> Unit)? = null,
 ) {
     val state by viewModel.state.collectAsState()
 
-    // Build pages: "All" + one per available system
-    val pages: List<GameSystem?> = listOf<GameSystem?>(null) + state.availableSystems
+    // Build pages: "All" + one per available system + optional "Server"
+    val hasServer = serverPage != null
+    val pages: List<GameSystem?> = if (hasServer) {
+        listOf<GameSystem?>(null) + state.availableSystems + listOf<GameSystem?>(null)
+    } else {
+        listOf<GameSystem?>(null) + state.availableSystems
+    }
     val pagerState = androidx.compose.foundation.pager.rememberPagerState(
         initialPage = 0,
         pageCount = { pages.size },
@@ -132,6 +138,11 @@ fun LibraryScreen(
                         state = pagerState,
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                     ) { pageIndex ->
+                        // Server page is the last page
+                        if (hasServer && pageIndex == pages.size - 1) {
+                            serverPage?.invoke()
+                            return@HorizontalPager
+                        }
                         val systemFilter = pages.getOrNull(pageIndex)
                         val pageGames = if (systemFilter != null) {
                             state.games.filter { it.system == systemFilter }
@@ -142,7 +153,7 @@ fun LibraryScreen(
                         }
 
                         Column {
-                            if (pageIndex == 0) {
+                            if (pageIndex == 0 && !(hasServer && pageIndex == pages.size - 1)) {
                                 OutlinedTextField(
                                     value = state.searchQuery,
                                     onValueChange = { viewModel.setSearch(it) },
@@ -185,7 +196,11 @@ fun LibraryScreen(
                         horizontalArrangement = Arrangement.Center,
                     ) {
                         pages.forEachIndexed { index, system ->
-                            val label = if (system == null) "All" else system.shortLabel()
+                            val label = when {
+                                hasServer && index == pages.size - 1 -> "Server"
+                                system == null -> "All"
+                                else -> system.shortLabel()
+                            }
                             val isSelected = index == currentPage
                             Column(
                                 modifier = Modifier

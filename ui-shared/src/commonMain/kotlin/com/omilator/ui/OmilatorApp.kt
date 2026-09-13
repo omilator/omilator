@@ -47,6 +47,7 @@ fun OmilatorApp(
     onDownloadEmulators: () -> Unit = {},
     isDesktop: Boolean = false,
     singleScreen: Boolean = false,
+    serverPage: (@Composable () -> Unit)? = null,
 ) {
     val windowClass = currentWindowSizeClass()
     var destination by rememberSaveable { mutableStateOf(OmilatorDestination.LIBRARY) }
@@ -76,6 +77,7 @@ fun OmilatorApp(
                     showTitle = false,
                     showRefresh = !singleScreen,
                     showQuickPlay = !singleScreen,
+                    serverPage = serverPage,
                 )
             } else {
                 SettingsScreen(
@@ -112,7 +114,8 @@ fun OmilatorApp(
                         onLaunchStandalone = onLaunchStandalone,
                         showStandalone = isDesktop,
                         onOpenGameSettings = onOpenGameSettings,
-                    )
+                        serverPage = serverPage,
+                )
                     OmilatorDestination.SETTINGS -> SettingsScreen(
                         viewModel = settingsViewModel,
                         onAddDirectory = onAddRomDirectory,
@@ -151,7 +154,8 @@ fun OmilatorApp(
                             onLaunchStandalone = onLaunchStandalone,
                         showStandalone = isDesktop,
                         onOpenGameSettings = onOpenGameSettings,
-                        )
+                            serverPage = serverPage,
+                )
                         OmilatorDestination.SETTINGS -> SettingsScreen(
                             viewModel = settingsViewModel,
                             onAddDirectory = onAddRomDirectory,

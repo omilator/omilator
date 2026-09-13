@@ -15,6 +15,13 @@ class LibtecaLiveE2eTest {
 
     @Test
     fun liveServerContract() = runBlocking {
+        // Live test: self-skips unless a libteca binary is reachable on :8496.
+        // Run: LIBTECA_E2E=1 ./gradlew :data-library:desktopTest (after
+        // starting the server per libteca's PLAN-GAMES G1 smoke).
+        if (System.getenv("LIBTECA_E2E") != "1") {
+            println("E2E-SKIP: set LIBTECA_E2E=1 to run against a live server")
+            return@runBlocking
+        }
         val source = LibtecaLibrarySource(
             baseUrl = "http://127.0.0.1:8496",
             token = runBlocking {

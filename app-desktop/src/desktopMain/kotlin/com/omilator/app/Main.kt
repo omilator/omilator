@@ -15,6 +15,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -44,6 +45,10 @@ import com.omilator.data.settings.defaultConfigDir
 import com.omilator.ui.OmilatorApp
 import com.omilator.ui.OmilatorTheme
 import com.omilator.ui.library.LibraryViewModel
+import com.omilator.ui.library.ServerGame
+import com.omilator.ui.library.ServerLibraryViewModel
+import com.omilator.ui.library.ServerLibrarySection
+import com.omilator.data.library.LibtecaLibrarySource
 import com.omilator.ui.player.PlayerScreen
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
@@ -79,6 +84,30 @@ fun main() = application {
         )
     }
     val settingsViewModel = remember { SettingsViewModel(settingsStore, settingsPath) }
+
+    // Libteca server library (PLAN-GAMES G4): the Server page appears as the
+    // last tab in the library pager when a server is configured in Settings.
+    val serverViewModel = remember {
+        ServerLibraryViewModel(connect = {
+            val url = settingsViewModel.state.value.libtecaServerUrl.trim()
+            val tok = settingsViewModel.state.value.libtecaServerToken.trim()
+            if (url.isEmpty() || tok.isEmpty()) null
+            else LibtecaServerConnection(url, tok, File(configDir, "rom-cache"))
+        })
+    }
+    val serverPage = remember<(@Composable () -> Unit)?> {
+        if (settingsViewModel.state.value.libtecaServerUrl.isNotBlank()) {
+            {
+                ServerLibrarySection(
+                    viewModel = serverViewModel,
+                    onPlayGame = { file, game ->
+                        playRom(file.absolutePath) { romPath -> playing = romPath }
+                        serverViewModel.reportPlaytime(game, 0)
+                    },
+                )
+            }
+        } else null
+    }
 
     // Load persisted settings on startup
     kotlinx.coroutines.runBlocking {
@@ -194,6 +223,7 @@ fun main() = application {
                     }
                 },
                 onOpenGameSettings = { romPath -> openGameSettings(romPath) },
+                serverPage = serverPage,
                 onDownloadEmulators = {
                     appScope.launch(Dispatchers.IO) {
                         val installer = EmulatorInstaller()
