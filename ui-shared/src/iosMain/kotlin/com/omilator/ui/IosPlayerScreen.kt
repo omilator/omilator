@@ -84,7 +84,19 @@ fun IosPlayerScreen(romPath: String, corePath: String, onExit: () -> Unit = {}) 
     // switches (previous code used remember { CoroutineScope(...) } which
     // never cancelled, leaving the core + audio engine running forever).
     val scope = rememberCoroutineScope()
-    val controller = remember { createCoreController("") }
+    // A real app-private directory: the env handler refuses system/save
+    // queries when the configured directory is empty, and BIOS-dependent
+    // cores need a usable path.
+    val libretroDir = remember {
+        (platform.Foundation.NSSearchPathForDirectoriesInDomains(
+            platform.Foundation.NSDocumentDirectory,
+            platform.Foundation.NSUserDomainMask,
+            true,
+        ).firstOrNull() as? String ?: "")
+            .let { "$it/../libretro" }
+            .also { platform.Foundation.NSFileManager.defaultManager.createDirectoryAtPath(it, withIntermediateDirectories = true, attributes = null, error = null) }
+    }
+    val controller = remember { createCoreController(libretroDir) }
     val audioOutput = remember { IosAudioOutput() }
     val buttonStates = remember { mutableStateMapOf<Int, Boolean>() }
 

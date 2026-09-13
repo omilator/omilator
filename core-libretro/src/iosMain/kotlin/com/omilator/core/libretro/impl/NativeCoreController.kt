@@ -46,23 +46,13 @@ internal val hwGetProcAddressCb = staticCFunction { sym: CPointer<ByteVar>? ->
 
 internal val envCb = staticCFunction { cmd: Int, data: CPointer<ByteVar>? ->
     val ctrl = nativeControllerInstance
-    val result: Boolean = if (ctrl != null) {
-        // Log only HW render requests — everything else is per-frame spam.
-        if (cmd == 14 || cmd == 74) NSLog("[envCb] cmd=%d", cmd)
-        when (cmd) {
-            10 -> { // SET_PIXEL_FORMAT
-                if (data != null) {
-                    ctrl.pixelFormat = data.reinterpret<IntVar>()[0]
-                }
-                true
-            }
-            14 -> { // SET_HW_RENDER — struct retro_hw_render_callback*
-                ctrl.handleSetHwRender(data)
-            }
-            0, 9, 19, 31, 51, 69 -> true
-            else -> false
-        }
-    } else false
+    // Log only HW render requests — everything else is per-frame spam.
+    if (cmd == 14 || cmd == 74) NSLog("[envCb] cmd=%d", cmd)
+    // Everything delegates to handleEnv: the raw list that used to live
+    // here returned success for 9/19/31 without writing their required
+    // outputs (and matched unflagged 51/69), while the corrected handler
+    // sat unused.
+    val result: Boolean = ctrl?.handleEnv(cmd, data) ?: false
     result
 }
 
@@ -356,6 +346,16 @@ internal class NativeCoreController : CoreController {
                         data.reinterpret<CPointerVar<ByteVar>>()[0] = dst
                         true
                     } else false
+                } else false
+            }
+            19 -> { // GET_LIBRETRO_PATH — the loaded core's own path
+                if (data != null && corePath.isNotEmpty()) {
+                    val bytes = corePath.encodeToByteArray() + 0.toByte()
+                    val dst = nativeHeap.allocArray<ByteVar>(bytes.size)
+                    for (i in bytes.indices) dst[i] = bytes[i]
+                    retainedEnvStrings.add(dst)
+                    data.reinterpret<CPointerVar<ByteVar>>()[0] = dst
+                    true
                 } else false
             }
             else -> false
