@@ -68,3 +68,6 @@ _internal/
 .env.*
 !.env.example
 *.local
+
+# --- nested own-repo ---
+omilator-site/
