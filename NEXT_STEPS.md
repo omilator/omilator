@@ -1,5 +1,25 @@
 # Next Steps — Priority Roadmap
 
+## 2026-09-12 — five-pass ChatGPT audit loop closed (116 findings, 113 fixed)
+
+The full loop record lives in the untracked `AUDIT-CHATGPT*.md` registers at
+the repo root (public-repo policy keeps them out of history). Highlights:
+the desktop FFM ABI layer was rebuilt against the vendored libretro.h
+(environment constants incl. the 0x10000 experimental bit, HW-render struct
+offsets, core-option/intl/legacy parsing, GET_VARIABLE semantics), all
+libretro calls were confined to a single core thread with a cancellable stop,
+and every platform's env handler now writes real outputs for the commands it
+answers.
+
+Runtime verification (2026-09-12): a self-skipping real-core smoke test is
+committed (`core-libretro/src/desktopTest/.../RealCoreSmokeTest.kt`) —
+Genesis Plus GX and snes9x both pass v1 option negotiation, content load,
+30 frames, an 823KB serialize round-trip and clean unload. The mesen
+osx/arm64 buildbot nightly segfaults in plain ctypes (upstream breakage);
+`bottom_left_origin` readback direction remains the one item needing a
+hardware-rendering core on a real screen.
+
+
 # Next Steps — Priority Roadmap
 
 ## DONE in v0.6 (2026-06-27) — Android parity + Linux/Win CI smoke
@@ -11,8 +31,9 @@
 - **`AndroidAudioOutput`** via `AudioTrack` (USAGE_GAME, MODE_STREAM,
   PERFORMANCE_MODE_LOW_LATENCY). AudioTrack.write blocks naturally —
   no need for the iOS MAX_PENDING backpressure cap.
-- **`AndroidCoreDownloader`** — direct `.so` download from buildbot's
-  `android/arm64-v8a` and `android/x86_64` paths. No vtool/codesign.
+- **`AndroidCoreDownloader`** — runtime-ABI download from buildbot's
+  `android/latest/<abi>` layout (`*_libretro_android.so.zip` artifacts,
+  extracted under the canonical `<core>_libretro.so` name). No vtool/codesign.
 - **`setup-cores-android.sh`** — bundles cores as `lib<core>_libretro.so`
   into `app-android/src/androidMain/jniLibs/<abi>/`. Auto-picked-up by
   Gradle, loaded at runtime via `System.loadLibrary`.
