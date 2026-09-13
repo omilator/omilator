@@ -35,6 +35,11 @@ kotlin {
         androidMain.dependencies {
             implementation(libs.androidx.documentfile)
         }
+        val desktopTest by getting {
+            dependencies {
+                implementation(kotlin("test"))
+            }
+        }
     }
 }
 

@@ -1,5 +1,19 @@
 # Next Steps — Priority Roadmap
 
+## 2026-09-13 — libteca games-library source (PLAN-GAMES G4, desktop)
+
+`data-library/.../LibtecaLibrarySource.kt` implements libteca's documented
+client contract (libteca `docs/omilator-client-contract.md`): games-library
+discovery with type filtering, works paging with `game-<platform>` editions,
+work detail with stable file ids, Range-resumed ROM download into a local
+cache keyed on `(fileId, size)`, cover fetch, and playtime POST back through
+the progress domain. A contract smoke test pins the client side against a
+fake server (auth header, 206 resume from a partial cache, byte-identical
+result, progress body); the server side's Range behavior was live-verified
+on a 1 GiB file in libteca. UI wiring into the library screen is the
+remaining integration step (browse/download/launch via the existing core
+resolution), pending a settings surface for server URL + token.
+
 ## 2026-09-12 — five-pass ChatGPT audit loop closed (116 findings, 113 fixed)
 
 The full loop record lives in the untracked `AUDIT-CHATGPT*.md` registers at
