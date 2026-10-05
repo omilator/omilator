@@ -271,3 +271,23 @@ Removed — see DONE section above.
 - TheGamesDB API: needs API key (free at thegamesdb.net)
 - Local files: ROM-name.png alongside ROM (works everywhere)
 - Delta bundles its own database (not applicable for us)
+
+## 2026-10-04 — GPT-web audit pass 6 (14 findings, 14 fixed in `94e77bf`)
+
+Full-loop record in the untracked `AUDIT-CHATGPT-6.md` at repo root.
+Headline: JNI pointer-command memory safety (stable `std::string` storage in
+CoreState), real `need_fullpath`/`block_extract`/in-memory content contract
+on both Android and desktop, core-resolution parity with the scanner (mGBA
+fallback removed), library scan dedupe, download resume guards, immutable
+server-game state, per-OS desktop path scheme, core-options SRAM-style
+hashing, idempotent teardown, GH-release asset parser, CI startup marker.
+
+Open follow-ups from the pass (not bugs, feature/migration work):
+
+- **F3 remainder:** `beetle_psx_hw`, `play`, `azahar`, `dolphin` have no
+  entry in `AndroidCoreDownloader` — those ROMs now surface "Core not
+  installed" honestly; add the cores to the Android download list.
+- **F9 remainder:** Linux/Windows file locations moved to XDG /
+  `%APPDATA%` with no migration of old settings/SRAM; macOS paths are
+  byte-identical. Decide whether a one-time migration is wanted before any
+  Linux/Windows release.
