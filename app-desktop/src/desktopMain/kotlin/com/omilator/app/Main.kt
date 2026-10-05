@@ -70,10 +70,14 @@ fun main() = application {
 
     /** A playing session tracks which ROM is up, which server game (if any)
      *  it belongs to, and when it started — server playtime is reported with
-     *  the real session duration when the player exits. */
+     *  the real session duration when the player exits. The reporting target
+     *  is captured with the session: consulting the current page ViewModel
+     *  at exit would report through whatever server the settings point at
+     *  by then (or a closed scope, dropping the playtime silently). */
     data class PlayingSession(
         val romPath: String,
         val serverGame: ServerGame? = null,
+        val reportPlaytime: ((ServerGame, Int) -> Unit)? = null,
         val startedAtNanos: Long = System.nanoTime(),
     )
 
@@ -124,7 +128,9 @@ fun main() = application {
             val seconds = ((System.nanoTime() - session.startedAtNanos) / 1_000_000_000L)
                 .coerceAtMost(Int.MAX_VALUE.toLong())
                 .toInt()
-            session.serverGame?.let { serverViewModel.reportPlaytime(it, seconds) }
+            session.serverGame?.let { game ->
+                session.reportPlaytime?.invoke(game, seconds)
+            }
             playing = null
         }
     }
@@ -133,7 +139,19 @@ fun main() = application {
             ServerLibrarySection(
                 viewModel = serverViewModel,
                 onPlayGame = { file, game ->
-                    playRom(file.absolutePath) { romPath -> playing = PlayingSession(romPath, game) }
+                    playRom(file.absolutePath) { romPath ->
+                        val url = settingsViewModel.state.value.libtecaServerUrl.trim()
+                        val tok = settingsViewModel.state.value.libtecaServerToken.trim()
+                        val reporter: ((ServerGame, Int) -> Unit)? =
+                            if (url.isEmpty() || tok.isEmpty()) null
+                            else {
+                                val conn = LibtecaServerConnection(url, tok, File(configDir, "rom-cache"))
+                                val report: (ServerGame, Int) -> Unit =
+                                    { g, secs -> conn.reportSession(g.editionId, secs) }
+                                report
+                            }
+                        playing = PlayingSession(romPath, game, reporter)
+                    }
                 },
             )
         }
@@ -151,6 +169,7 @@ fun main() = application {
     var setupNeeded by remember { mutableStateOf(false) }
     var setupStatus by remember { mutableStateOf("") }
     var setupProgress by remember { mutableStateOf(0f) }
+    var setupRunId by remember { mutableStateOf(0) }
 
     // Check on startup what's missing
     val coreDownloader = remember { CoreDownloader(coresDir) }
@@ -162,10 +181,13 @@ fun main() = application {
         setupNeeded = true
     }
 
-    // Run the auto-download
-    LaunchedEffect(Unit) {
+    // Run the auto-download. Keyed on setupRunId so Retry (or any later
+    // re-run) restarts it; a failed attempt must not leave the loop having
+    // only counted steps.
+    LaunchedEffect(setupRunId) {
         if (!setupNeeded) return@LaunchedEffect
         withContext(Dispatchers.IO) {
+            setupProgress = 0f
             val totalSteps = coresMissing + emulatorsMissing
             var done = 0
 
@@ -189,10 +211,21 @@ fun main() = application {
                 }
             }
 
-            setupStatus = "Setup complete"
+            // Recompute reality instead of trusting the loop's completion:
+            // a network failure leaves components missing, and declaring
+            // success would dismiss setup while they stay absent.
+            val stillMissingCores = coreDownloader.cores.count { !coreDownloader.isInstalled(it) }
+            val stillMissingEmulators = emulatorInstaller.emulators.count { !emulatorInstaller.isInstalled(it) }
+            if (stillMissingCores + stillMissingEmulators == 0) {
+                setupStatus = "Setup complete"
+                setupNeeded = false
+            } else {
+                setupProgress = 1f
+                setupStatus = "Setup incomplete: $stillMissingCores core(s) and " +
+                    "$stillMissingEmulators emulator(s) could not be installed"
+            }
             settingsViewModel.setCoresStatus(coreDownloader.installedCount(), coreDownloader.cores.size)
             settingsViewModel.setEmulatorsStatus(emulatorInstaller.installedCount(), emulatorInstaller.emulators.size)
-            setupNeeded = false
         }
     }
 
@@ -301,7 +334,11 @@ fun main() = application {
                             )
                         }
                     },
-                    confirmButton = {},
+                    confirmButton = {
+                        TextButton(onClick = { setupRunId++ }) {
+                            Text("Retry")
+                        }
+                    },
                     dismissButton = {
                         TextButton(onClick = { setupNeeded = false }) {
                             Text("Skip")

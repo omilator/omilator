@@ -81,9 +81,20 @@ class LibtecaServerConnection(
         }.start()
     }
 
-    override fun playtimePosition(editionId: Long): Int = try {
+    override fun playtimePosition(editionId: Long): Int? = try {
         source.playtimePosition(editionId)
     } catch (_: Exception) {
-        0
+        null
+    }
+
+    /** Off the caller's thread (the UI thread when a play session ends):
+     *  the position GET is blocking, with no bound the HTTP stack will
+     *  honor by default. */
+    override fun reportSession(editionId: Long, sessionSeconds: Int) {
+        Thread {
+            try {
+                super.reportSession(editionId, sessionSeconds)
+            } catch (_: Exception) {}
+        }.start()
     }
 }

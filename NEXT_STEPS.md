@@ -322,3 +322,20 @@ Kotlin+JNI builds, iOS compile all green.
 - ROM downloads verify server-provided `sha256` (optional field; absent =
   size-only as before; mismatch truncates the cache and re-downloads).
   Server side landed in libteca (games payload + contract update).
+
+## 2026-10-04 (pass 8) — GPT-web audit: 10 findings, 9 fixed, 1 server-gated
+
+Full-loop record in the untracked pass-8 report (_gpt-audit). Fixed:
+sha256 verification on cache hits (closes the deliberate size-only scoping
+gap), playtime reporter bound to its own connection (survives settings
+changes mid-play), desktop core resolution via the shared table (mGBA
+fallback removed; .iso now follows shared PS1 policy), save-state paths
+under DesktopPaths.dataDir + rom-hash names (not migrated - DECIDED-NO),
+empty rewind states excluded, rewind 64 MB / 300-snapshot budget,
+downloader binary-magic validation (ELF/MZ/Mach-O per platform),
+playtime GET failure no longer reported as zero seconds (+ Int overflow
+fix in the 30-day cap), first-run setup stays open on incomplete installs
+with retry. Skipped: playtime lost-update race needs a libteca contract
+change (CAS revision or increment endpoint) - revisit if the contract
+grows it. macOS note: .iso quick-play errors until the known-open
+beetle_psx_hw osx download entry is fixed.

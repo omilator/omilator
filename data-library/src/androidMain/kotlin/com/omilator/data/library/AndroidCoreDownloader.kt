@@ -64,8 +64,27 @@ class AndroidCoreDownloader(private val coresDir: File) {
 
     private val buildbotBase = "https://buildbot.libretro.com/nightly/android/latest/$abi"
 
+    /** A core file that does not even carry the dynamic-library magic is
+     *  debris (partial historical write, HTML error page, corruption) —
+     *  treating it as installed would pin it forever. */
+    private fun looksLikeElf(file: File): Boolean {
+        val h = ByteArray(4)
+        file.inputStream().use { input ->
+            var off = 0
+            while (off < h.size) {
+                val n = input.read(h, off, h.size - off)
+                if (n < 0) return false
+                off += n
+            }
+        }
+        return h[0] == 0x7f.toByte() && h[1] == 'E'.code.toByte() &&
+            h[2] == 'L'.code.toByte() && h[3] == 'F'.code.toByte()
+    }
+
     fun isInstalled(entry: CoreEntry): Boolean =
-        File(coresDir, "${entry.name}_libretro.so").let { it.exists() && it.length() > 0 }
+        File(coresDir, "${entry.name}_libretro.so").let {
+            it.exists() && it.length() > 0 && looksLikeElf(it)
+        }
 
     fun installedCount(): Int = cores.count { isInstalled(it) }
 

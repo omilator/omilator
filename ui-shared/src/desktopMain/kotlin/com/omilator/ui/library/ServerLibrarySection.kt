@@ -88,8 +88,27 @@ class ServerLibraryViewModel(
         fun listGames(): List<ServerGame>
         fun downloadRom(game: ServerGame, onProgress: (Float) -> Unit): File?
         fun playtime(editionId: Long, seconds: Int)
-        /** Current playtime position (seconds played) for an edition, or 0. */
-        fun playtimePosition(editionId: Long): Int
+
+        /** Current playtime position (seconds played) for an edition, or
+         *  null when the server has none recorded or the call fails. */
+        fun playtimePosition(editionId: Long): Int?
+
+        /** Reports a play session as the contract's cumulative position:
+         *  the stored value is fetched and the session added onto it. Only
+         *  POSTs when the prior value was actually obtained — a failed GET
+         *  must not overwrite the server's real position with a bare
+         *  session total. */
+        fun reportSession(editionId: Long, sessionSeconds: Int) {
+            val existing = playtimePosition(editionId) ?: return
+            // Long arithmetic: an Int-range existing plus the session must
+            // saturate at the cap, not wrap negative. Capped just under the
+            // server's 30-day policy limit for editions without a known
+            // duration.
+            val total = (existing.toLong() + sessionSeconds.toLong())
+                .coerceAtMost(30L * 24 * 60 * 60 - 1)
+                .toInt()
+            playtime(editionId, total)
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -184,17 +203,10 @@ class ServerLibraryViewModel(
     }
 
     fun reportPlaytime(game: ServerGame, sessionSeconds: Int) {
-        if (_state.value.downloads[game.fileId]?.localFile == null) return
         scope.launch(Dispatchers.IO) {
             try {
                 val conn = connect() ?: return@launch
-                // The server's progress position is a cumulative play-seconds
-                // counter set by the POST, so the session duration adds onto
-                // the stored position. Capped just under the server's 30-day
-                // policy limit for editions without a known duration.
-                val existing = conn.playtimePosition(game.editionId)
-                val total = (existing + sessionSeconds).coerceAtMost(30 * 24 * 60 * 60 - 1)
-                conn.playtime(game.editionId, total)
+                conn.reportSession(game.editionId, sessionSeconds)
             } catch (_: Exception) {}
         }
     }

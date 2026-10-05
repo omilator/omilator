@@ -46,6 +46,10 @@ fun PlayerScreen(
     onClose: () -> Unit,
 ) {
     val corePath = remember(gameId) { resolveCorePath(gameId) }
+    if (corePath == null) {
+        NoCoreMappingScreen(romPath = gameId, onClose = onClose)
+        return
+    }
     val audioOutput = remember { createAudioOutputFactory().create() }
     val engine = remember(gameId) {
         PlayerEngine(
@@ -163,8 +167,6 @@ fun PlayerScreen(
                     return@onKeyEvent true
                 }
                 if (event.type == KeyEventType.KeyUp) {
-                    val saveDir = File(System.getProperty("user.home"), "Library/Application Support/Omilator/saves").apply { mkdirs() }
-                    val romBase = File(gameId).nameWithoutExtension
                     when (keyCode) {
                         // Fast forward toggle (Tab)
                         java.awt.event.KeyEvent.VK_TAB -> {
@@ -172,18 +174,18 @@ fun PlayerScreen(
                             engine.setSpeedMultiplier(if (fastForward) 3.0f else 1.0f)
                             true
                         }
-                        // Save state slots: F1-F10
-                        java.awt.event.KeyEvent.VK_F1 -> { engine.saveState(File(saveDir, "$romBase.slot1.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F2 -> { engine.saveState(File(saveDir, "$romBase.slot2.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F3 -> { engine.saveState(File(saveDir, "$romBase.slot3.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F4 -> { engine.saveState(File(saveDir, "$romBase.slot4.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F5 -> { engine.saveState(File(saveDir, "$romBase.slot5.state").absolutePath); true }
+                        // Save state slots: F1-F5
+                        java.awt.event.KeyEvent.VK_F1 -> { engine.saveState(engine.stateFile(1).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F2 -> { engine.saveState(engine.stateFile(2).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F3 -> { engine.saveState(engine.stateFile(3).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F4 -> { engine.saveState(engine.stateFile(4).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F5 -> { engine.saveState(engine.stateFile(5).absolutePath); true }
                         // Load state slots: Shift+F1-F5
-                        java.awt.event.KeyEvent.VK_F6 -> { engine.loadState(File(saveDir, "$romBase.slot1.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F7 -> { engine.loadState(File(saveDir, "$romBase.slot2.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F8 -> { engine.loadState(File(saveDir, "$romBase.slot3.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F9 -> { engine.loadState(File(saveDir, "$romBase.slot4.state").absolutePath); true }
-                        java.awt.event.KeyEvent.VK_F10 -> { engine.loadState(File(saveDir, "$romBase.slot5.state").absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F6 -> { engine.loadState(engine.stateFile(1).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F7 -> { engine.loadState(engine.stateFile(2).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F8 -> { engine.loadState(engine.stateFile(3).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F9 -> { engine.loadState(engine.stateFile(4).absolutePath); true }
+                        java.awt.event.KeyEvent.VK_F10 -> { engine.loadState(engine.stateFile(5).absolutePath); true }
                         else -> false
                     }
                 } else false
@@ -286,6 +288,37 @@ fun PlayerScreen(
     }
 }
 
+/** Unsupported extension: no silent mGBA fallback — scanner and launcher
+ *  resolve through the same GameSystem table, so what the library refuses
+ *  to scan must not launch here either. */
+@Composable
+private fun NoCoreMappingScreen(romPath: String, onClose: () -> Unit) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .focusRequester(focusRequester)
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp &&
+                    event.key.nativeKeyCode == java.awt.event.KeyEvent.VK_ESCAPE
+                ) {
+                    onClose()
+                    true
+                } else false
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(24.dp)) {
+            Text("No core mapping for ROM", color = MaterialTheme.colorScheme.error)
+            Text(romPath, color = Color.LightGray, style = MaterialTheme.typography.bodyMedium)
+            Text("Esc to go back", color = Color.Gray, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 16.dp))
+        }
+    }
+}
+
 @Composable
 private fun EmulatedSurface(bitmap: ImageBitmap, aspectRatio: Float, scaleMode: Int = 0) {
     Canvas(modifier = Modifier.fillMaxSize()) {
@@ -367,28 +400,13 @@ private fun DebugOverlay(
     }
 }
 
-private fun resolveCorePath(romPath: String): String {
-    val ext = File(romPath).extension.lowercase()
-    val coreName = when (ext) {
-        "gba", "gb", "gbc", "sgb" -> "mgba_libretro"
-        "nes", "nez", "unf", "unif" -> "mesen_libretro"
-        "sfc", "smc", "fig", "swc" -> "snes9x_libretro"
-        "md", "bin", "smd", "gen" -> "genesis_plus_gx_libretro"
-        "n64", "z64", "v64" -> "mupen64plus_next_libretro"
-        "cue", "chd", "m3u", "pbp", "img" -> "beetle_psx_hw_libretro"
-        "nds", "ids" -> "melonds_libretro"
-        "cso", "prx", "elf" -> "ppsspp_libretro"
-        "gcm", "gci", "ciso" -> "dolphin_libretro"
-        "wbfs", "wad", "gcz" -> "dolphin_libretro"
-        "3ds", "3dsx", "cci", "cxi" -> "azahar_libretro"
-        "nrg", "mdf", "gz" -> "play_libretro"
-        "cdi", "gdi", "gdl" -> "flycast_libretro"
-        // .iso is genuinely ambiguous (PSP / GameCube / Wii / PS1 / PS2 / DC / Saturn).
-        // Default to PPSSPP since PSP ISOs are the most common modern-retro .iso use.
-        // User can rename to .pbp (unambiguous PS1) or .gcm (unambiguous GameCube).
-        "iso" -> "ppsspp_libretro"
-        else -> "mgba_libretro"
-    }
+private fun resolveCorePath(romPath: String): String? {
+    // Same resolver as every scanner: a private extension table here could
+    // (and did) diverge from GameSystem detection and silently launched
+    // unknown extensions on mGBA.
+    val system = com.omilator.data.library.GameSystem.detectByExtension(File(romPath).extension)
+        ?: return null
+    val coreName = "${system.preferredCore}_libretro"
     val candidates = buildList {
         val exts = listOf("dylib", "so", "dll")
         exts.forEach { add(File("cores/$coreName.$it")) }

@@ -132,6 +132,14 @@ class PlayerEngine(
         return java.io.File(dir, "${sanitizedRomBase()}-${romIdHash()}.srm")
     }
 
+    /** Manual save states follow the same path policy as SRAM/options
+     *  (DesktopPaths, not a rebuilt macOS path) and the same per-ROM
+     *  identity, so identically named ROMs never share state slots. */
+    fun stateFile(slot: Int): java.io.File {
+        val dir = java.io.File(DesktopPaths.dataDir, "states").apply { mkdirs() }
+        return java.io.File(dir, "${sanitizedRomBase()}-${romIdHash()}.slot$slot.state")
+    }
+
     private fun loadPersistedOptions() {
         val file = optionsFile()
         if (!file.exists()) return
@@ -296,14 +304,30 @@ class PlayerEngine(
     private val rewindBuffer = java.util.ArrayDeque<ByteArray>()
     private var rewindFrameCounter = 0
 
+    /** Serialized states of large cores run to multiple MB, so the buffer
+     *  is bounded by bytes as well as count — a snapshot cap alone allowed
+     *  hundreds of MB to pile up. */
+    private val maxRewindBytes = 64L * 1024 * 1024
+    private var rewindBytes = 0L
+
+    private fun addRewindState(state: ByteArray) {
+        // Cores without serialization return an empty state; buffering it
+        // would make rewind replay zero-byte states forever.
+        if (state.isEmpty() || state.size > maxRewindBytes) return
+
+        rewindBuffer.addLast(state)
+        rewindBytes += state.size
+        while (rewindBuffer.size > 300 || rewindBytes > maxRewindBytes) {
+            rewindBytes -= rewindBuffer.removeFirst().size
+        }
+    }
+
     fun tickRewind() {
         rewindFrameCounter++
         if (rewindFrameCounter >= 10) {
             rewindFrameCounter = 0
             try {
-                val state = controller.saveStateToMemory()
-                rewindBuffer.addLast(state)
-                while (rewindBuffer.size > 300) rewindBuffer.removeFirst()
+                addRewindState(controller.saveStateToMemory())
             } catch (_: Throwable) {}
         }
     }
@@ -311,6 +335,7 @@ class PlayerEngine(
     fun rewindStep(): Boolean = runBlocking {
         withContext(coreDispatcher) {
             val state = rewindBuffer.pollLast() ?: return@withContext false
+            rewindBytes -= state.size
             controller.loadStateFromMemory(state)
         }
     }

@@ -46,10 +46,38 @@ class CoreDownloader(private val targetDir: File) {
 
     private val buildbotBase = "https://buildbot.libretro.com/nightly/${platform.buildbotPath}/latest"
 
+    /** A core file that does not even carry the platform's dynamic-library
+     *  magic is debris (partial historical write, HTML error page,
+     *  corruption) — treating it as installed would pin it forever. */
+    private fun looksLikeNativeLibrary(file: File): Boolean {
+        val h = ByteArray(4)
+        file.inputStream().use { input ->
+            var off = 0
+            while (off < h.size) {
+                val n = input.read(h, off, h.size - off)
+                if (n < 0) return false
+                off += n
+            }
+        }
+        val magic = ((h[0].toLong() and 0xff) shl 24) or ((h[1].toLong() and 0xff) shl 16) or
+            ((h[2].toLong() and 0xff) shl 8) or (h[3].toLong() and 0xff)
+        return when (platform.coreExt) {
+            "dll" -> h[0] == 'M'.code.toByte() && h[1] == 'Z'.code.toByte()
+            "so" -> magic == 0x7f454c46L
+            // Mach-O thin magics in either byte order, plus FAT wrappers.
+            else -> magic in longArrayOf(
+                0xFEEDFACEL, 0xFEEDFACFL, 0xCEFAEDFEL, 0xCFFAEDFEL,
+                0xCAFEBABEL, 0xCAFEBABFL, 0xBEBAFECAL, 0xBFBAFECAL,
+            )
+        }
+    }
+
     /** Returns true if a core library already exists in targetDir. A
      *  zero-length file is a truncated install, not an installed core. */
     fun isInstalled(entry: CoreEntry): Boolean =
-        File(targetDir, "${entry.name}.${platform.coreExt}").let { it.exists() && it.length() > 0 }
+        File(targetDir, "${entry.name}.${platform.coreExt}").let {
+            it.exists() && it.length() > 0 && looksLikeNativeLibrary(it)
+        }
 
     /** Count of installed cores. */
     fun installedCount(): Int = cores.count { isInstalled(it) }

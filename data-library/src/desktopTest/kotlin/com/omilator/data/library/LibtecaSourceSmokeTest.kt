@@ -27,7 +27,12 @@ class LibtecaSourceSmokeTest {
     private val rom = ByteArray(300_000) { (it % 251).toByte() }
     private var sawAuth = false
     private var sawRange: String? = null
+    private var streamHits = 0
     private var progressBody: String? = null
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes).joinToString("") { "%02x".format(it) }
 
     @BeforeTest
     fun start() {
@@ -53,6 +58,7 @@ class LibtecaSourceSmokeTest {
             )
         }
         server.createContext("/api/core/stream/500") { ex ->
+            streamHits++
             sawRange = ex.requestHeaders.getFirst("Range")
             val from = sawRange?.substringAfter("bytes=")?.substringBefore("-")?.toLongOrNull() ?: 0L
             if (from > 0) {
@@ -119,11 +125,47 @@ class LibtecaSourceSmokeTest {
         assertTrue(resumed.readBytes().contentEquals(rom), "resumed bytes identical")
 
         // Cumulative playtime: the stored position is fetched first so the
-        // client can add the session duration before POSTing the sum.
+        // client can add the session duration before POSTing the sum. An
+        // unreadable position is null, not zero — zero is a real value.
         assertEquals(3600, source.playtimePosition(100), "stored playtime position")
-        assertEquals(0, source.playtimePosition(999), "unknown edition reads as zero")
+        assertEquals(null, source.playtimePosition(999), "unknown edition reads as null")
 
         assertTrue(source.reportPlaytime(100, 42))
         assertTrue(progressBody!!.contains("\"position\":42"), "progress body: $progressBody")
+    }
+
+    @Test
+    fun sameSizeCorruptCacheIsRejectedWhenShaKnown() = runBlocking {
+        val digest = sha256Hex(rom)
+        val local = source.downloadRom(500, rom.size.toLong(), digest)
+        assertTrue(local.readBytes().contentEquals(rom), "initial download bytes")
+
+        // Corrupt in place, keeping the exact byte length: only the digest
+        // can tell this cache hit from a good one.
+        java.io.RandomAccessFile(local, "rw").use {
+            it.seek(10)
+            it.write(byteArrayOf(1, 2, 3, 4))
+        }
+
+        val hitsBefore = streamHits
+        val replaced = source.downloadRom(500, rom.size.toLong(), digest)
+        assertTrue(streamHits > hitsBefore, "corrupt same-size cache re-contacted the stream endpoint")
+        assertTrue(replaced.length() == rom.size.toLong(), "replaced size")
+        assertTrue(replaced.readBytes().contentEquals(rom), "cache replaced with good bytes")
+    }
+
+    @Test
+    fun sameSizeCacheIsTrustedWhenShaUnknown() = runBlocking {
+        val local = source.downloadRom(500, rom.size.toLong())
+        java.io.RandomAccessFile(local, "rw").use {
+            it.seek(10)
+            it.write(byteArrayOf(1, 2, 3, 4))
+        }
+
+        // No digest = byte-identical old size-only cache-hit path.
+        val hitsBefore = streamHits
+        val cached = source.downloadRom(500, rom.size.toLong())
+        assertEquals(hitsBefore, streamHits, "size-only hit must not re-download")
+        assertEquals(rom.size.toLong(), cached.length(), "cache returned unchanged")
     }
 }

@@ -148,12 +148,27 @@ class LibtecaLibrarySource(
         null
     }
 
+    private fun sha256Matches(file: File, expected: String): Boolean {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                digest.update(buf, 0, n)
+            }
+        }
+        val actual = digest.digest().joinToString("") { "%02x".format(it) }
+        return actual.equals(expected.trim(), ignoreCase = true)
+    }
+
     /**
      * Downloads a ROM into cacheDir/<serverKey>/<fileId>-<size>.rom with
      * Range resume, keyed on server identity + the stable file id + size
      * per the contract. Returns the local file. When the server payload
-     * provided a [sha256], the completed bytes are verified against it and
-     * a mismatch fails the download with the cache truncated to zero.
+     * provided a [sha256], it is verified on every path that returns cached
+     * bytes — completed cache hits too, not only fresh downloads — and a
+     * mismatch fails the download with the cache truncated to zero.
      */
     suspend fun downloadRom(
         fileId: Long,
@@ -166,8 +181,15 @@ class LibtecaLibrarySource(
         if (size > 0) {
             when {
                 have == size -> {
-                    onProgress?.onProgress(size, size)
-                    return@withContext dst
+                    if (sha256 == null || sha256Matches(dst, sha256)) {
+                        onProgress?.onProgress(size, size)
+                        return@withContext dst
+                    }
+
+                    // Same-size cache with the wrong bytes: drop them so the
+                    // retry re-downloads from zero instead of returning them.
+                    java.io.RandomAccessFile(dst, "rw").use { it.setLength(0) }
+                    have = 0
                 }
 
                 have > size -> {
@@ -221,18 +243,8 @@ class LibtecaLibrarySource(
                 }
             }
             if (sha256 != null) {
-                val digest = MessageDigest.getInstance("SHA-256")
-                dst.inputStream().use { input ->
-                    val buf = ByteArray(64 * 1024)
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n < 0) break
-                        digest.update(buf, 0, n)
-                    }
-                }
-                val actual = digest.digest().joinToString("") { "%02x".format(it) }
                 val expected = sha256.trim()
-                val matches = actual.equals(expected, ignoreCase = true)
+                val matches = sha256Matches(dst, expected)
                 if (!matches) {
                     // Same treatment as any other corrupted cache entry:
                     // drop the bytes so a retry re-downloads from zero
@@ -240,7 +252,7 @@ class LibtecaLibrarySource(
                     java.io.RandomAccessFile(dst, "rw").use { it.setLength(0) }
                 }
                 require(matches) {
-                    "stream: sha256 mismatch for file $fileId: expected $expected, got $actual"
+                    "stream: sha256 mismatch for file $fileId: expected $expected"
                 }
             }
             dst
@@ -249,9 +261,10 @@ class LibtecaLibrarySource(
         }
     }
 
-    /** Current playtime position (seconds played) for an edition; 0 when
-     *  the server has none recorded or the call fails. */
-    fun playtimePosition(editionId: Long): Int = try {
+    /** Current playtime position (seconds played) for an edition; null
+     *  when the server has none recorded or the call fails — callers must
+     *  not conflate that with a stored zero. */
+    fun playtimePosition(editionId: Long): Int? = try {
         val u = URL(baseUrl.trimEnd('/') + "/api/core/progress/$editionId")
         val conn = u.openAuthed()
         val body = conn.inputStream.use { it.readBytes() }
@@ -259,8 +272,8 @@ class LibtecaLibrarySource(
         conn.disconnect()
         if (code == 200) {
             json.decodeFromString<ProgressPayload>(body.decodeToString()).position.toInt()
-        } else 0
-    } catch (_: Exception) { 0 }
+        } else null
+    } catch (_: Exception) { null }
 
     /** Reports play seconds back as the contract's progress position. */
     suspend fun reportPlaytime(editionId: Long, secondsPlayed: Int): Boolean = withContext(Dispatchers.IO) {
