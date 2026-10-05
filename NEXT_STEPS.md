@@ -291,3 +291,16 @@ Open follow-ups from the pass (not bugs, feature/migration work):
   `%APPDATA%` with no migration of old settings/SRAM; macOS paths are
   byte-identical. Decide whether a one-time migration is wanted before any
   Linux/Windows release.
+
+## 2026-10-04 (later) — GPT-web audit pass 7 (13 findings fixed, report truncated at 13)
+
+Full-loop record in the untracked `AUDIT-CHATGPT-7.md` (inline reply was
+cut mid-finding-13; a recovery request for 14+ is pending). Headline:
+per-handle JNI CoreState (process-global core state removed), Android env
+support v1 negotiation + log interface + stable GET_VARIABLE storage,
+Android SRAM save/load with SHA-256 SAF identity, server tab state
+recomposition, real playtime reporting (GET+add+POST cumulative), per-work
+detail fetching, refresh/scan race guards, IO-dispatcher installs, atomic
+core downloads with exact-member ZIP validation, run-ahead rollback
+fallback, lifecycle-tied player launch. Desktop test 7/7, Android
+Kotlin+JNI builds, iOS compile all green.
