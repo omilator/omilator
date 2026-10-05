@@ -45,8 +45,10 @@ import com.omilator.data.library.GameSystem
 
 /**
  * The UI-facing model for a game on a libteca server. Carries everything
- * the card needs: identity, platform, download state, and the local file
- * once downloaded.
+ * the card needs: identity and platform. Download state lives in
+ * ServerLibraryViewModel.State (immutable, Compose-observable) instead of
+ * mutable fields here — mutating those from IO coroutines never reliably
+ * recomposed the UI.
  */
 data class ServerGame(
     val workId: Long,
@@ -58,10 +60,6 @@ data class ServerGame(
     val fileSizeBytes: Long,
 ) {
     val system: GameSystem? get() = gameSystemFromPlatformTag(platformTag)
-
-    /** Set by the ViewModel once the ROM is fully downloaded. */
-    var localFile: java.io.File? = null
-    var downloadProgress: Float = -1f // -1 = not started, 0..1 = downloading, 1 = done
 }
 
 /**
@@ -98,6 +96,7 @@ fun gameSystemFromPlatformTag(tag: String): GameSystem? = when (tag) {
 @Composable
 fun ServerGameCard(
     game: ServerGame,
+    download: ServerLibraryViewModel.DownloadState?,
     onDownload: () -> Unit,
     onPlay: (java.io.File) -> Unit,
     modifier: Modifier = Modifier,
@@ -155,8 +154,8 @@ fun ServerGameCard(
             }
 
             // Action overlay — top-right
-            val isDownloaded = game.localFile != null
-            val isDownloading = game.downloadProgress in 0f..1f && !isDownloaded
+            val isDownloaded = download?.localFile != null
+            val isDownloading = download != null && !isDownloaded
 
             Box(
                 modifier = Modifier
@@ -168,7 +167,7 @@ fun ServerGameCard(
                 when {
                     isDownloaded -> {
                         IconButton(
-                            onClick = { game.localFile?.let(onPlay) },
+                            onClick = { download?.localFile?.let(onPlay) },
                             modifier = Modifier.padding(2.dp),
                         ) {
                             Icon(
@@ -185,7 +184,7 @@ fun ServerGameCard(
                             contentAlignment = Alignment.Center,
                         ) {
                             CircularProgressIndicator(
-                                progress = { game.downloadProgress.coerceIn(0f, 1f) },
+                                progress = { (download?.progress ?: 0f).coerceIn(0f, 1f) },
                                 modifier = Modifier.padding(2.dp),
                                 color = Color.White,
                                 strokeWidth = 2.dp,
@@ -210,7 +209,7 @@ fun ServerGameCard(
             // Download progress bar — bottom edge
             if (isDownloading) {
                 LinearProgressIndicator(
-                    progress = { game.downloadProgress.coerceIn(0f, 1f) },
+                    progress = { (download?.progress ?: 0f).coerceIn(0f, 1f) },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()

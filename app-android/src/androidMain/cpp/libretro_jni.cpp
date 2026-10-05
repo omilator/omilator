@@ -11,6 +11,9 @@
 #include <dlfcn.h>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <string>
+#include <vector>
 
 #define LOG_TAG "OmilatorJNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
@@ -51,6 +54,17 @@ struct CoreState {
     void (*retro_set_audio_sample_batch)(retro_audio_sample_batch_t) = nullptr;
     void (*retro_set_input_poll)(retro_input_poll_t) = nullptr;
     void (*retro_set_input_state)(retro_input_state_t) = nullptr;
+
+    // Stable storage for pointer-valued environment outputs. libretro cores
+    // may retain the returned pointers, so they must outlive the environment
+    // callback and stay valid until the core is unloaded.
+    std::string system_directory;
+    std::string save_directory;
+    std::string core_path;
+
+    // Content buffer for cores with need_fullpath == false; kept alive until
+    // core unload because the core may reference it beyond retro_load_game.
+    std::vector<uint8_t> game_content;
 };
 
 JavaVM* g_jvm = nullptr;
@@ -82,6 +96,33 @@ T resolve(void* h, const char* name) {
 }
 
 bool on_environment(unsigned cmd, void* data) {
+    if (!data) return false;
+
+    // Pointer-valued outputs are answered in native code: the data argument
+    // is a const char** the frontend must point at stable storage. Copying
+    // string bytes into it (as the old writeNativeString did) overwrites
+    // adjacent memory and hands the core a bogus pointer.
+    switch (cmd) {
+        case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
+            *reinterpret_cast<const char**>(data) =
+                g_state.system_directory.c_str();
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+            *reinterpret_cast<const char**>(data) =
+                g_state.save_directory.c_str();
+            return true;
+
+        case RETRO_ENVIRONMENT_GET_LIBRETRO_PATH:
+            if (g_state.core_path.empty()) return false;
+            *reinterpret_cast<const char**>(data) =
+                g_state.core_path.c_str();
+            return true;
+
+        default:
+            break;
+    }
+
     if (!g_controller_ref) return false;
     JNIEnv* env = attach();
     if (!env) return false;
@@ -216,16 +257,54 @@ Java_com_omilator_core_libretro_impl_JniCoreController_loadCoreNative(
     return JNI_TRUE;
 }
 
+JNIEXPORT void JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_setEnvPathsNative(
+    JNIEnv* env, jobject, jstring systemDirJ, jstring saveDirJ, jstring corePathJ) {
+    if (systemDirJ) {
+        const char* s = env->GetStringUTFChars(systemDirJ, nullptr);
+        if (s) { g_state.system_directory = s; env->ReleaseStringUTFChars(systemDirJ, s); }
+    }
+    if (saveDirJ) {
+        const char* s = env->GetStringUTFChars(saveDirJ, nullptr);
+        if (s) { g_state.save_directory = s; env->ReleaseStringUTFChars(saveDirJ, s); }
+    }
+    if (corePathJ) {
+        const char* s = env->GetStringUTFChars(corePathJ, nullptr);
+        if (s) { g_state.core_path = s; env->ReleaseStringUTFChars(corePathJ, s); }
+    }
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_omilator_core_libretro_impl_JniCoreController_loadGameNative(
     JNIEnv* env, jobject thiz, jstring pathJ) {
     const char* path = env->GetStringUTFChars(pathJ, nullptr);
-    struct retro_game_info info{};
-    info.path = path;
-    info.data = nullptr;
-    info.size = 0;
-    info.meta = nullptr;
-    bool ok = g_state.retro_load_game(&info);
+    struct retro_system_info info{};
+    if (g_state.retro_get_system_info) g_state.retro_get_system_info(&info);
+    struct retro_game_info gi{};
+    gi.path = path;
+    gi.meta = nullptr;
+    if (!info.need_fullpath) {
+        // The core expects in-memory content: read the file and keep the
+        // buffer alive until core unload.
+        FILE* f = fopen(path, "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz > 0) {
+                g_state.game_content.resize(static_cast<size_t>(sz));
+                size_t rd = fread(g_state.game_content.data(), 1,
+                                  static_cast<size_t>(sz), f);
+                g_state.game_content.resize(rd);
+                if (!g_state.game_content.empty()) {
+                    gi.data = g_state.game_content.data();
+                    gi.size = g_state.game_content.size();
+                }
+            }
+            fclose(f);
+        }
+    }
+    bool ok = g_state.retro_load_game(&gi);
     env->ReleaseStringUTFChars(pathJ, path);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
@@ -300,6 +379,38 @@ Java_com_omilator_core_libretro_impl_JniCoreController_systemInfoNameNative(
     return env->NewStringUTF(info.library_name ? info.library_name : "");
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_systemInfoVersionNative(
+    JNIEnv* env, jobject) {
+    struct retro_system_info info{};
+    if (g_state.retro_get_system_info) g_state.retro_get_system_info(&info);
+    return env->NewStringUTF(info.library_version ? info.library_version : "");
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_systemInfoExtensionsNative(
+    JNIEnv* env, jobject) {
+    struct retro_system_info info{};
+    if (g_state.retro_get_system_info) g_state.retro_get_system_info(&info);
+    return env->NewStringUTF(info.valid_extensions ? info.valid_extensions : "");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_systemInfoNeedFullpathNative(
+    JNIEnv*, jobject) {
+    struct retro_system_info info{};
+    if (g_state.retro_get_system_info) g_state.retro_get_system_info(&info);
+    return info.need_fullpath ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_systemInfoBlockExtractNative(
+    JNIEnv*, jobject) {
+    struct retro_system_info info{};
+    if (g_state.retro_get_system_info) g_state.retro_get_system_info(&info);
+    return info.block_extract ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jdoubleArray JNICALL
 Java_com_omilator_core_libretro_impl_JniCoreController_systemAvInfoNative(
     JNIEnv* env, jobject) {
@@ -317,17 +428,6 @@ Java_com_omilator_core_libretro_impl_JniCoreController_systemAvInfoNative(
     jdoubleArray arr = env->NewDoubleArray(7);
     if (arr) env->SetDoubleArrayRegion(arr, 0, 7, out);
     return arr;
-}
-
-JNIEXPORT void JNICALL
-Java_com_omilator_core_libretro_impl_JniCoreController_writeNativeString(
-    JNIEnv* env, jobject, jlong ptr, jstring s) {
-    if (ptr == 0 || s == nullptr) return;
-    const char* chars = env->GetStringUTFChars(s, nullptr);
-    if (chars == nullptr) return;
-    size_t len = strlen(chars) + 1;
-    memcpy(reinterpret_cast<void*>(ptr), chars, len);
-    env->ReleaseStringUTFChars(s, chars);
 }
 
 JNIEXPORT jint JNICALL

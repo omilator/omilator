@@ -43,9 +43,4 @@ class DesktopSettingsPersistence(private val configDir: String) {
     )
 }
 
-fun defaultConfigDir(): String {
-    val home = System.getProperty("user.home")
-    val dir = File(home, "Library/Application Support/Omilator")
-    if (!dir.exists()) dir.mkdirs()
-    return dir.absolutePath
-}
+fun defaultConfigDir(): String = DesktopPaths.configDir

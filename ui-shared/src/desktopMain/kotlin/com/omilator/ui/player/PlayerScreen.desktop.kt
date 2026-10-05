@@ -393,8 +393,8 @@ private fun resolveCorePath(romPath: String): String {
         val exts = listOf("dylib", "so", "dll")
         exts.forEach { add(File("cores/$coreName.$it")) }
         exts.forEach { add(File("../cores/$coreName.$it")) }
-        val home = System.getProperty("user.home")
-        exts.forEach { add(File("$home/Library/Application Support/Omilator/cores/$coreName.$it")) }
+        val installed = File(com.omilator.data.settings.DesktopPaths.dataDir, "cores")
+        exts.forEach { add(File(installed, "$coreName.$it")) }
     }
     return candidates.firstOrNull { it.exists() }?.absolutePath
         ?: File("cores/$coreName.dylib").absolutePath

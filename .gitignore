@@ -71,3 +71,6 @@ _internal/
 
 # --- nested own-repo ---
 omilator-site/
+
+# --- GPT-web audit working dir ---
+/_gpt-audit/

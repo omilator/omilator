@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This repository is **public** and mirrored to GitHub at https://github.com/im-tyler/omilator.
+This repository is **public** and mirrored to GitHub at https://github.com/omilator/omilator.
 Every commit is publicly visible — treat all work as public-facing.
 
 ## Do not commit private/transient context

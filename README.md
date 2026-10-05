@@ -33,8 +33,8 @@ iosApp/           Xcode project hosting Compose (iOS Native via cinterop)
 
 | Layer | Choice |
 |---|---|
-| Language | Kotlin 2.0.21 |
-| UI | Compose Multiplatform 1.7.0 (Material 3) |
+| Language | Kotlin 2.1.20 |
+| UI | Compose Multiplatform 1.9.0 (Material 3) |
 | Build | Gradle 8.10.2 (wrapper bundled) |
 | Desktop libretro | JDK 21 Foreign Function & Memory API (no JNI) |
 | Cores | libretro (vendored `libretro.h`); user-supplied cores at runtime |

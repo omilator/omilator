@@ -48,6 +48,10 @@ internal class LibretroFfm(
     var pixelFormat: Int = PixelFormatC.ORGB1555
         private set
 
+    /** Cached from retro_get_system_info by [callSystemInfo]; drives [callLoadGame]. */
+    var needFullPath: Boolean = false
+        private set
+
     /** Options declared by the core via SET_CORE_OPTIONS. */
     val coreOptions: MutableList<CoreOption> = mutableListOf()
 
@@ -260,13 +264,15 @@ internal class LibretroFfm(
 
     fun callApiVersion(): Int = apiVersion!!.invoke() as Int
 
-    fun callSystemInfo(): Triple<String, String, String> {
+    fun callSystemInfo(): FfmSystemInfo {
         val seg = arena.allocate(systemInfo)
         getSystemInfo!!.invoke(seg)
         val name = readCString(seg, systemInfo.varHandle(path("library_name")))
         val version = readCString(seg, systemInfo.varHandle(path("library_version")))
         val ext = readCString(seg, systemInfo.varHandle(path("valid_extensions")))
-        return Triple(name, version, ext)
+        needFullPath = (systemInfo.varHandle(path("need_fullpath")).get(seg) as Byte).toInt() != 0
+        val blockExtract = (systemInfo.varHandle(path("block_extract")).get(seg) as Byte).toInt() != 0
+        return FfmSystemInfo(name, version, ext, needFullPath, blockExtract)
     }
 
     fun callSystemAvInfo(): AvInfo {
@@ -287,11 +293,26 @@ internal class LibretroFfm(
         val pathSeg = arena.allocateUtf8String(romPath)
         val info = arena.allocate(LibretroLayouts.gameInfo)
         info.set(ValueLayout.ADDRESS, 0, pathSeg)
-        info.set(
-            ValueLayout.JAVA_LONG,
-            LibretroLayouts.gameInfo.byteOffset(path("size")),
-            0L,
-        )
+        if (!needFullPath) {
+            // The core declared need_fullpath == false: it expects content
+            // in memory. The arena keeps the buffer alive until core unload,
+            // which is as long as the core may legally reference it.
+            val content = runCatching { java.io.File(romPath).readBytes() }.getOrNull()
+            if (content != null && content.isNotEmpty()) {
+                val dataSeg = arena.allocate(content.size.toLong())
+                MemorySegment.copy(content, 0, dataSeg, ValueLayout.JAVA_BYTE, 0, content.size)
+                info.set(
+                    ValueLayout.ADDRESS,
+                    LibretroLayouts.gameInfo.byteOffset(path("data")),
+                    dataSeg,
+                )
+                info.set(
+                    ValueLayout.JAVA_LONG,
+                    LibretroLayouts.gameInfo.byteOffset(path("size")),
+                    content.size.toLong(),
+                )
+            }
+        }
         val result = loadGameHandle!!.invoke(info)
         return result as Boolean
     }
@@ -690,4 +711,12 @@ internal data class AvInfo(
     val aspectRatio: Float,
     val fps: Double,
     val sampleRate: Double,
+)
+
+internal data class FfmSystemInfo(
+    val name: String,
+    val version: String,
+    val extensions: String,
+    val needFullPath: Boolean,
+    val blockExtract: Boolean,
 )

@@ -1,5 +1,10 @@
 package com.omilator.data.launcher
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -122,20 +127,27 @@ class EmulatorInstaller {
             val conn = URL(apiUrl).openConnection() as HttpURLConnection
             conn.requestMethod = "GET"
             conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
+            // GitHub's API requires a User-Agent; anonymous Java clients get 403.
+            conn.setRequestProperty("User-Agent", "omilator-installer")
             conn.connectTimeout = 10000
             conn.readTimeout = 10000
-            if (conn.responseCode != 200) return null
+            if (conn.responseCode != 200) {
+                println("[Omilator] GitHub API HTTP ${conn.responseCode} for $apiUrl")
+                return null
+            }
             val body = conn.inputStream.bufferedReader().readText()
             conn.disconnect()
-            // Parse JSON to find the right asset
-            val assetRegex = Regex(""""browser_download_url"\s*:\s*"(.*?)"""")
-            val nameRegex = Regex(""""name"\s*:\s*"(.*?)"""")
-            val urls = assetRegex.findAll(body).map { it.groupValues[1] }.toList()
-            val names = nameRegex.findAll(body).map { it.groupValues[1] }.toList()
-            // Find the asset matching our filter
-            for (i in urls.indices) {
-                val name = names.getOrElse(i) { "" }
-                if (spec.assetFilter(name)) return urls[i]
+            // Parse the release as JSON. Two independent regex scans (all
+            // "name" fields vs all "browser_download_url" fields) paired
+            // by index — "name" occurs outside asset objects too, so the
+            // pairing picked the wrong asset.
+            val assets = kotlinx.serialization.json.Json.parseToJsonElement(body)
+                .jsonObject["assets"]?.jsonArray ?: return null
+            for (asset in assets) {
+                val obj = asset.jsonObject
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: continue
+                val url = obj["browser_download_url"]?.jsonPrimitive?.contentOrNull ?: continue
+                if (spec.assetFilter(name)) return url
             }
             null
         } catch (e: Exception) {

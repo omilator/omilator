@@ -11,7 +11,7 @@ jobs:
   #--------------------------------------------------------------------
   # Desktop builds — Windows, Linux, macOS.
   # HW render (GLFW) should work on Windows and Linux; macOS is blocked
-  # by the GLFW/Cocoa main-thread conflict (documented in SESSION_NOTES).
+  # by the GLFW/Cocoa main-thread conflict (tracked in NEXT_STEPS.md).
   #--------------------------------------------------------------------
   desktop:
     name: Desktop (${{ matrix.os }})
@@ -68,17 +68,22 @@ jobs:
             timeout 15 \
             java -cp "app-desktop/build/libs/*:app-desktop/build/compose/tmp/prepareAppResources/*:ui-shared/build/libs/*:core-libretro/build/libs/*:core-audio/build/libs/*:core-render/build/libs/*:core-input/build/libs/*:data-library/build/libs/*:data-settings/build/libs/*:data-saves/build/libs/*:data-launcher/build/libs/*" \
               --enable-native-access=ALL-UNNAMED \
-              com.omilator.app.MainKt &
+              com.omilator.app.MainKt > smoke-output.log 2>&1 &
           APP_PID=$!
-          # Wait briefly; if the process is still alive after 10s, the JVM
-          # booted, Compose initialised, and the window opened. We kill it
-          # and consider the smoke test passed.
-          sleep 10
-          if kill -0 $APP_PID 2>/dev/null; then
-            echo "OK: app launched"
-            kill $APP_PID 2>/dev/null || true
+          # Wait for the wrapper chain to exit, then require the app's own
+          # startup marker in its output. The old check only tested that the
+          # xvfb-run/timeout wrapper was still alive at 10s — a JVM crash
+          # racing the 15s timeout could still report success.
+          set +e
+          wait $APP_PID
+          EXIT_CODE=$?
+          set -e
+          echo "smoke exit code: $EXIT_CODE"
+          if grep -q "OMILATOR_STARTUP_OK" smoke-output.log; then
+            echo "OK: app window initialized"
           else
-            echo "FAIL: app crashed within 10 seconds"
+            echo "FAIL: no startup marker; output was:"
+            cat smoke-output.log
             exit 1
           fi
 

@@ -9,8 +9,13 @@ class LibraryRepository(
 ) {
     private var cached: List<Game> = emptyList()
 
-    suspend fun rescan(directory: String): List<Game> {
-        cached = scanner.scan(directory)
+    /** Scans every configured directory into one cache. The old
+     *  single-directory rescan overwrote the cache once per directory, so
+     *  repository-level queries only ever saw the last one. */
+    suspend fun rescan(directories: List<String>): List<Game> {
+        cached = directories
+            .flatMap { scanner.scan(it) }
+            .distinctBy { it.id }
         return cached
     }
 

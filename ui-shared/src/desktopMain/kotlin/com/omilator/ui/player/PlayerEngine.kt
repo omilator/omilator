@@ -11,6 +11,7 @@ import com.omilator.core.libretro.api.JoypadButton
 import com.omilator.core.libretro.api.PixelFormat
 import com.omilator.core.libretro.api.VideoSink
 import com.omilator.core.libretro.createCoreController
+import com.omilator.data.settings.DesktopPaths
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,7 +49,7 @@ class PlayerEngine(
     }.asCoroutineDispatcher()
 
     private val scope = CoroutineScope(SupervisorJob() + coreDispatcher)
-    private val controller: CoreController = createCoreController(systemDirectory = defaultSystemDir())
+    private val controller: CoreController = createCoreController(systemDirectory = DesktopPaths.dataDir)
     private val converter = FrameConverter()
     private val inputState = InputStateHolder()
     private val gamepadPoller = GamepadPoller()
@@ -78,6 +79,10 @@ class PlayerEngine(
             _state.value = _state.value.copy(isLoading = false, geometry = avInfo.geometry, fps = avInfo.timing.fps)
             frameLoop = scope.launch { runLoop(avInfo.timing.fps) }
         } catch (t: Throwable) {
+            // A half-started engine (core loaded, then loadGame/audio/options
+            // failed) must tear itself down — stop() is not guaranteed to
+            // run after a startup error.
+            teardownNative()
             _state.value = _state.value.copy(isLoading = false, error = "${t::class.simpleName}: ${t.message}")
         }
     }
@@ -108,19 +113,23 @@ class PlayerEngine(
         }
     }
 
-    private fun sramFile(): java.io.File {
-        val dir = java.io.File(System.getProperty("user.home"),
-            "Library/Application Support/Omilator/saves").apply { mkdirs() }
-        // The basename alone collided across games in different directories
-        // or systems - one game could restore and then overwrite another's
-        // battery RAM. The canonical path is hashed into the name.
+    /** Stable per-ROM identity: the basename alone collided across games in
+     *  different directories or systems, and hashed into SRAM and option
+     *  file names keeps both independent. */
+    private fun romIdHash(): String {
         val canonical = java.io.File(romPath).canonicalPath
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        return java.security.MessageDigest.getInstance("SHA-256")
             .digest(canonical.encodeToByteArray())
             .take(8)
             .joinToString("") { "%02x".format(it) }
-        val base = java.io.File(romPath).nameWithoutExtension.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        return java.io.File(dir, "$base-$digest.srm")
+    }
+
+    private fun sanitizedRomBase(): String =
+        java.io.File(romPath).nameWithoutExtension.replace(Regex("[^A-Za-z0-9._-]"), "_")
+
+    private fun sramFile(): java.io.File {
+        val dir = java.io.File(DesktopPaths.dataDir, "saves").apply { mkdirs() }
+        return java.io.File(dir, "${sanitizedRomBase()}-${romIdHash()}.srm")
     }
 
     private fun loadPersistedOptions() {
@@ -144,9 +153,11 @@ class PlayerEngine(
     }
 
     private fun optionsFile(): java.io.File {
-        val dir = java.io.File(System.getProperty("user.home"),
-            "Library/Application Support/Omilator/options").apply { mkdirs() }
-        return java.io.File(dir, "${java.io.File(romPath).nameWithoutExtension}.json")
+        val dir = java.io.File(DesktopPaths.dataDir, "options").apply { mkdirs() }
+        // Same identity scheme as SRAM: two identically named ROMs used to
+        // share one option file. The content is key=value lines, so the
+        // extension says .properties, not .json.
+        return java.io.File(dir, "${sanitizedRomBase()}-${romIdHash()}.properties")
     }
 
     /**
@@ -161,16 +172,28 @@ class PlayerEngine(
         runBlocking {
             loop?.cancelAndJoin()
             withContext(coreDispatcher) {
-                runCatching { controller.detach() }
-                runCatching { flushSram() }
-                runCatching { controller.unloadGame() }
-                runCatching { controller.unloadCore() }
-                runCatching { gamepadPoller.destroy() }
-                runCatching { audioOutput.release() }
+                teardownNative()
             }
         }
         scope.cancel()
         coreDispatcher.close()
+    }
+
+    /** Idempotent core/audio/input teardown; shared by stop() and the
+     *  failure path of start() so a half-started engine cleans up after
+     *  itself. Runs on the core thread. */
+    @Volatile
+    private var tornDown = false
+
+    private fun teardownNative() {
+        if (tornDown) return
+        tornDown = true
+        runCatching { controller.detach() }
+        runCatching { flushSram() }
+        runCatching { controller.unloadGame() }
+        runCatching { controller.unloadCore() }
+        runCatching { gamepadPoller.destroy() }
+        runCatching { audioOutput.release() }
     }
 
     fun pressButton(button: Int) {
@@ -322,13 +345,6 @@ data class PlayerState(
     val fps: Float = 60f,
     val error: String? = null,
 )
-
-private fun defaultSystemDir(): String {
-    val home = System.getProperty("user.home")
-    val dir = java.io.File(home, "Library/Application Support/Omilator")
-    if (!dir.exists()) dir.mkdirs()
-    return dir.absolutePath
-}
 
 private class InputStateHolder {
     private val buttons = IntArray(16)

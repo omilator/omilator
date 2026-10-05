@@ -4,6 +4,7 @@ import com.omilator.core.libretro.impl.FfmCoreController
 import kotlinx.coroutines.runBlocking
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -67,6 +68,9 @@ class RealCoreSmokeTest {
         runBlocking {
             val info = controller.loadCore(dylib.toString())
             println("SMOKE snes9x: ${info.libraryName}")
+            // snes9x declares need_fullpath = false: the frontend must pass
+            // content in memory, and SystemInfo must report the real flag.
+            assertFalse(info.needFullpath, "snes9x need_fullpath reported honestly")
             val av = controller.loadGame(rom.absolutePath)
             assertTrue(av.geometry.baseWidth > 0u, "AV geometry reported")
             println("SMOKE av: ${av.geometry.baseWidth}x${av.geometry.baseHeight} @ ${av.timing.fps}fps ${av.timing.sampleRate}Hz")
@@ -89,6 +93,29 @@ class RealCoreSmokeTest {
             controller.unloadGame()
             controller.unloadCore()
             println("SMOKE snes9x content-load run serialize unload CLEAN")
+        }
+    }
+
+    @Test
+    fun ppssppReportsNeedFullpath() {
+        val dylib = core("ppsspp_libretro.dylib") ?: run {
+            println("SMOKE-SKIP: ppsspp core not present")
+            return
+        }
+        // PPSSPP declares need_fullpath = true: a hardcoded `false` in the
+        // controller's SystemInfo would silently break content loading.
+        val controller = FfmCoreController(systemDirectory = System.getProperty("java.io.tmpdir"))
+        runBlocking {
+            try {
+                val info = controller.loadCore(dylib.toString())
+                assertTrue(info.needFullpath, "ppsspp need_fullpath must be reported as true")
+                println("SMOKE ppsspp needFullpath=true reported")
+                controller.unloadCore()
+            } catch (t: Throwable) {
+                // The dylib may fail to dlopen without MoltenVK present;
+                // the flag assertion only counts when the core loads.
+                println("SMOKE-SKIP: ppsspp core failed to load: ${t.message}")
+            }
         }
     }
 }

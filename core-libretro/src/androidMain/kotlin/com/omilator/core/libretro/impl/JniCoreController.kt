@@ -19,10 +19,7 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
 
     private companion object {
         const val EXPERIMENTAL = 0x10000
-        const val GET_SYSTEM_DIRECTORY = 9
         const val SET_PIXEL_FORMAT = 10
-        const val GET_LIBRETRO_PATH = 19
-        const val GET_SAVE_DIRECTORY = 31
         const val GET_INPUT_BITMASKS = 51 or EXPERIMENTAL
     }
     private var videoSink: VideoSink? = null
@@ -37,16 +34,20 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
     override suspend fun loadCore(path: String): SystemInfo {
         System.loadLibrary("omilator_jni")
         corePath = path
+        // Pointer-valued environment outputs are answered from native-side
+        // stable storage, so the directories must be installed there before
+        // retro_init() runs inside loadCoreNative.
+        setEnvPathsNative(systemDirectory, systemDirectory, path)
         val ok = loadCoreNative(path)
         if (!ok) throw RuntimeException("Failed to load core: $path")
         loaded = true
-        val name = systemInfoNameNative()
+        val ext = systemInfoExtensionsNative()
         return SystemInfo(
-            libraryName = name,
-            libraryVersion = "unknown",
-            validExtensions = emptyList(),
-            needFullpath = false,
-            blockExtract = false,
+            libraryName = systemInfoNameNative(),
+            libraryVersion = systemInfoVersionNative(),
+            validExtensions = ext.split("|").filter { it.isNotBlank() },
+            needFullpath = systemInfoNeedFullpathNative(),
+            blockExtract = systemInfoBlockExtractNative(),
         )
     }
 
@@ -126,25 +127,14 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
     @Suppress("unused")
     fun onEnvironment(cmd: Int, dataPtr: Long): Boolean {
         // Success only after the command's required output is satisfied:
-        // raw 0/9/19/31 true-without-writes handed cores garbage pointers,
-        // and 51 must carry the EXPERIMENTAL bit (mask polling is NOT
-        // implemented, so it is honestly refused).
+        // raw 10 true-without-writes handed cores garbage formats, and 51
+        // must carry the EXPERIMENTAL bit (mask polling is NOT implemented,
+        // so it is honestly refused). Directory/path commands (9/19/31) are
+        // answered in native code before this trampoline is reached.
         return when (cmd) {
             SET_PIXEL_FORMAT -> {
                 if (dataPtr != 0L) {
                     pixelFormat = readNativeInt(dataPtr)
-                    true
-                } else false
-            }
-            GET_SYSTEM_DIRECTORY, GET_SAVE_DIRECTORY -> {
-                if (dataPtr != 0L) {
-                    writeNativeString(dataPtr, systemDirectory)
-                    true
-                } else false
-            }
-            GET_LIBRETRO_PATH -> {
-                if (dataPtr != 0L) {
-                    writeNativeString(dataPtr, corePath)
                     true
                 } else false
             }
@@ -208,15 +198,19 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
 
     // JNI declarations
     private external fun loadCoreNative(path: String): Boolean
+    private external fun setEnvPathsNative(systemDir: String, saveDir: String, corePath: String)
     private external fun loadGameNative(path: String): Boolean
     private external fun systemAvInfoNative(): DoubleArray
-    private external fun writeNativeString(ptr: Long, s: String)
     private external fun runFrameNative()
     private external fun resetNative()
     private external fun unloadGameNative()
     private external fun deinitNative()
     private external fun apiVersionNative(): Int
     private external fun systemInfoNameNative(): String
+    private external fun systemInfoVersionNative(): String
+    private external fun systemInfoExtensionsNative(): String
+    private external fun systemInfoNeedFullpathNative(): Boolean
+    private external fun systemInfoBlockExtractNative(): Boolean
     private external fun serializeSizeNative(): Long
     private external fun saveStateNative(bytes: ByteArray, size: Long): Boolean
     private external fun loadStateNative(bytes: ByteArray, size: Long): Boolean

@@ -176,6 +176,9 @@ fun main() = application {
         title = "Omilator",
         state = windowState,
     ) {
+        // Startup marker for the CI smoke test: proves the Compose window
+        // actually initialized, not just that the JVM process survived.
+        LaunchedEffect(Unit) { println("OMILATOR_STARTUP_OK") }
         val romPath = playing
         if (romPath != null) {
             OmilatorTheme {

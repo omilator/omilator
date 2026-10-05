@@ -72,15 +72,27 @@ class LibraryViewModel(
     fun rescan() = rescan(_state.value.scannedDirectories)
 
     fun rescan(directories: List<String>) {
-        if (directories.isEmpty()) return
+        // Emptying the directory list must clear the library too — the old
+        // early return kept games from directories the user had removed.
+        if (directories.isEmpty()) {
+            _state.value = _state.value.copy(
+                isLoading = false,
+                games = emptyList(),
+                selectedSystem = null,
+                error = null,
+            )
+            return
+        }
         scope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
-                val all = mutableListOf<Game>()
-                for (dir in directories) {
-                    all += repository.rescan(dir)
-                }
-                _state.value = _state.value.copy(isLoading = false, games = all)
+                val games = repository.rescan(directories)
+                val systems = games.map { it.system }.toSet()
+                _state.value = _state.value.copy(
+                    isLoading = false,
+                    games = games,
+                    selectedSystem = _state.value.selectedSystem?.takeIf { it in systems },
+                )
             } catch (t: Throwable) {
                 _state.value = _state.value.copy(isLoading = false, error = t.message ?: "Scan failed")
             }

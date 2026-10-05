@@ -37,6 +37,7 @@ import com.omilator.data.library.GameSystem
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -55,10 +56,17 @@ import java.io.File
 class ServerLibraryViewModel(
     private val connect: () -> ServerConnection?,
 ) {
+    /** Per-fileId download state. Absent from the map = never downloaded. */
+    data class DownloadState(
+        val progress: Float = 0f,
+        val localFile: File? = null,
+    )
+
     data class State(
         val isLoading: Boolean = true,
         val error: String? = null,
         val games: List<ServerGame> = emptyList(),
+        val downloads: Map<Long, DownloadState> = emptyMap(),
         val searchQuery: String = "",
         val selectedSystem: GameSystem? = null,
     ) {
@@ -83,9 +91,6 @@ class ServerLibraryViewModel(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
-
-    // In-flight download jobs keyed on fileId
-    private val downloading = mutableSetOf<Long>()
 
     fun refresh() {
         _state.value = _state.value.copy(isLoading = true, error = null)
@@ -112,38 +117,52 @@ class ServerLibraryViewModel(
     }
 
     fun download(game: ServerGame) {
-        if (game.fileId in downloading || game.localFile != null) return
-        downloading.add(game.fileId)
-        game.downloadProgress = 0f
-        _state.value = _state.value // trigger recomposition
+        // In-flight or already downloaded: nothing to do. Derived from
+        // state, so the old unsynchronized in-flight set is gone.
+        if (_state.value.downloads[game.fileId] != null) return
+        _state.value = _state.value.copy(
+            downloads = _state.value.downloads + (game.fileId to DownloadState(progress = 0f)),
+        )
 
         scope.launch(Dispatchers.IO) {
             try {
-                val conn = connect() ?: return@launch
+                val conn = connect() ?: run {
+                    clearDownload(game.fileId)
+                    return@launch
+                }
                 val file = conn.downloadRom(game) { progress ->
-                    game.downloadProgress = progress
-                    // Throttle UI updates to avoid recomposition storm
+                    // Throttle UI updates to avoid recomposition storm.
+                    // StateFlow is updated with fresh immutable copies, so
+                    // every emission is a real change Compose can observe.
                     if (progress >= 1f || (progress * 100).toInt() % 10 == 0) {
-                        scope.launch { _state.value = _state.value }
+                        _state.update { s ->
+                            val d = s.downloads[game.fileId] ?: return@update s
+                            s.copy(downloads = s.downloads + (game.fileId to d.copy(progress = progress)))
+                        }
                     }
                 }
                 if (file != null && file.exists()) {
-                    game.localFile = file
-                    game.downloadProgress = 1f
+                    _state.update { s ->
+                        s.copy(
+                            downloads = s.downloads +
+                                (game.fileId to DownloadState(progress = 1f, localFile = file)),
+                        )
+                    }
                 } else {
-                    game.downloadProgress = -1f
+                    clearDownload(game.fileId)
                 }
             } catch (e: Exception) {
-                game.downloadProgress = -1f
-            } finally {
-                downloading.remove(game.fileId)
-                scope.launch { _state.value = _state.value }
+                clearDownload(game.fileId)
             }
         }
     }
 
+    private fun clearDownload(fileId: Long) {
+        _state.update { s -> s.copy(downloads = s.downloads - fileId) }
+    }
+
     fun reportPlaytime(game: ServerGame, seconds: Int) {
-        if (game.localFile == null) return
+        if (_state.value.downloads[game.fileId]?.localFile == null) return
         scope.launch(Dispatchers.IO) {
             try {
                 connect()?.playtime(game.editionId, seconds)
@@ -258,6 +277,7 @@ fun ServerLibrarySection(
                     items(state.visibleGames, key = { it.fileId }) { game ->
                         ServerGameCard(
                             game = game,
+                            download = state.downloads[game.fileId],
                             onDownload = { viewModel.download(game) },
                             onPlay = { file -> onPlayGame(file, game) },
                         )

@@ -61,13 +61,13 @@ internal class FfmCoreController(
         }
         arena = newArena
         native = n
-        val (name, version, ext) = n.callSystemInfo()
+        val core = n.callSystemInfo()
         val info = SystemInfo(
-            libraryName = name,
-            libraryVersion = version,
-            validExtensions = ext.split("|").filter { it.isNotBlank() },
-            needFullpath = false,
-            blockExtract = false,
+            libraryName = core.name,
+            libraryVersion = core.version,
+            validExtensions = core.extensions.split("|").filter { it.isNotBlank() },
+            needFullpath = core.needFullPath,
+            blockExtract = core.blockExtract,
         )
         systemInfoCache = info
         return info

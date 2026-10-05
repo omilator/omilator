@@ -165,12 +165,30 @@ class MainActivity : ComponentActivity() {
                                 }.getOrElse { return@launch }
                             } else path
                             val coreName = coreNameForRom(playPath)
+                            if (coreName == null) {
+                                runOnUiThread {
+                                    android.widget.Toast.makeText(
+                                        applicationContext,
+                                        "No core mapping for this ROM",
+                                        android.widget.Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                                return@launch
+                            }
                             val bundled = bundledCorePath(coreName)
                             val downloaded = File(coresDir, "$coreName.so").absolutePath
                             val resolved = bundled ?: downloaded.takeIf { File(it).exists() }
                             if (resolved != null) {
                                 playingCore.value = resolved
                                 playingRom.value = playPath
+                            } else {
+                                runOnUiThread {
+                                    android.widget.Toast.makeText(
+                                        applicationContext,
+                                        "Core not installed: $coreName",
+                                        android.widget.Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
                             }
                         }
                     },
@@ -198,15 +216,12 @@ class MainActivity : ComponentActivity() {
         return if (candidate.exists()) candidate.absolutePath else null
     }
 
-    private fun coreNameForRom(path: String): String {
-        val ext = path.substringAfterLast('.', "").lowercase()
-        return when (ext) {
-            "gba", "gb", "gbc", "sgb" -> "mgba_libretro"
-            "nes", "nez" -> "mesen_libretro"
-            "sfc", "smc" -> "snes9x_libretro"
-            "iso", "cso", "prx" -> "ppsspp_libretro"
-            "n64", "z64", "v64" -> "mupen64plus_next_libretro"
-            else -> "mgba_libretro"
-        }
+    /** Core for a ROM, resolved through the same GameSystem detection the
+     *  scanner uses — the old extension table disagreed with it and silently
+     *  launched unknown systems on mGBA. Null = no mapping. */
+    private fun coreNameForRom(path: String): String? {
+        val ext = path.substringAfterLast('.', "")
+        val system = com.omilator.data.library.GameSystem.detectByExtension(ext) ?: return null
+        return "${system.preferredCore}_libretro"
     }
 }

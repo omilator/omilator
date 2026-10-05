@@ -138,26 +138,42 @@ class LibtecaLibrarySource(
         conn.setRequestProperty("Authorization", "Bearer $token")
         if (have > 0) conn.setRequestProperty("Range", "bytes=$have-")
         try {
-            val partial = conn.responseCode == 206
-            require(conn.responseCode == 200 || partial) { "stream: HTTP ${conn.responseCode}" }
-            if (conn.responseCode == 200 && have > 0) {
-                // Server ignored the range: restart the file.
-                have = 0
-            }
-            val total = if (size > 0) size else (have + conn.contentLengthLong.coerceAtLeast(0))
-            val out = java.io.RandomAccessFile(dst, "rw")
-            out.seek(have)
-            val buf = ByteArray(64 * 1024)
-            conn.inputStream.use { input ->
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    have += n
-                    onProgress?.onProgress(have, total)
+            val code = conn.responseCode
+            val partial = code == 206
+            require(code == 200 || partial) { "stream: HTTP $code" }
+            if (partial) {
+                // A 206 must resume exactly where we asked; otherwise the
+                // patched-together file would be silently corrupt.
+                val range = conn.getHeaderField("Content-Range") ?: ""
+                require(range.startsWith("bytes $have-")) {
+                    "stream: server resumed at unexpected offset: $range"
                 }
             }
-            out.close()
+            java.io.RandomAccessFile(dst, "rw").use { out ->
+                if (code == 200 && have > 0) {
+                    // Server ignored the range: restart from zero AND drop
+                    // stale trailing bytes the new payload will not cover.
+                    have = 0
+                    out.setLength(0)
+                }
+                val total = if (size > 0) size else (have + conn.contentLengthLong.coerceAtLeast(0))
+                out.seek(have)
+                val buf = ByteArray(64 * 1024)
+                conn.inputStream.use { input ->
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        have += n
+                        onProgress?.onProgress(have, total)
+                    }
+                }
+                if (size > 0) {
+                    require(out.length() == size) {
+                        "stream: downloaded ${out.length()} bytes, expected $size"
+                    }
+                }
+            }
             dst
         } finally {
             conn.disconnect()
