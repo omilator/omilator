@@ -7,6 +7,7 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
 
 /**
  * Libteca games library source (PLAN-GAMES G4): browses a libteca server's
@@ -24,6 +25,32 @@ class LibtecaLibrarySource(
     private val cacheDir: File,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
+
+    /**
+     * File ids are only unique within one libteca server/database, so the
+     * cache is namespaced by a hash of the normalized server identity
+     * (scheme, host, port, path — never the token). Without this, two
+     * servers sharing a file id would reuse each other's cached ROM.
+     */
+    private val serverCacheDir = File(cacheDir, serverCacheKey(baseUrl))
+
+    private fun serverCacheKey(baseUrl: String): String {
+        val u = URL(baseUrl.trim())
+        val normalized = buildString {
+            append(u.protocol.lowercase())
+            append("://")
+            append(u.host.lowercase())
+            if (u.port != -1) {
+                append(':')
+                append(u.port)
+            }
+            append(u.path.trimEnd('/'))
+        }
+        return MessageDigest.getInstance("SHA-256")
+            .digest(normalized.encodeToByteArray())
+            .take(8)
+            .joinToString("") { "%02x".format(it) }
+    }
 
     fun interface ProgressListener {
         fun onProgress(bytes: Long, total: Long)
@@ -122,19 +149,32 @@ class LibtecaLibrarySource(
     }
 
     /**
-     * Downloads a ROM into cacheDir/<fileId>.rom with Range resume, keyed on
-     * the stable file id + size per the contract. Returns the local file.
+     * Downloads a ROM into cacheDir/<serverKey>/<fileId>-<size>.rom with
+     * Range resume, keyed on server identity + the stable file id + size
+     * per the contract. Returns the local file.
      */
     suspend fun downloadRom(
         fileId: Long,
         size: Long,
         onProgress: ProgressListener? = null,
     ): File = withContext(Dispatchers.IO) {
-        val dst = File(cacheDir.apply { mkdirs() }, "$fileId.rom")
+        val dst = File(serverCacheDir.apply { mkdirs() }, "$fileId-$size.rom")
         var have = if (dst.exists()) dst.length() else 0L
-        if (size > 0 && have >= size) {
-            onProgress?.onProgress(size, size)
-            return@withContext dst
+        if (size > 0) {
+            when {
+                have == size -> {
+                    onProgress?.onProgress(size, size)
+                    return@withContext dst
+                }
+
+                have > size -> {
+                    // Oversized cache entries are corrupt (old buggy
+                    // download or reused identity) — accepting them would
+                    // pass invalid ROM bytes downstream.
+                    java.io.RandomAccessFile(dst, "rw").use { it.setLength(0) }
+                    have = 0
+                }
+            }
         }
         val u = URL(baseUrl.trimEnd('/') + "/api/core/stream/$fileId")
         val conn = u.openConnection() as HttpURLConnection

@@ -25,7 +25,6 @@ import com.omilator.ui.player.MobilePlayerScreen
 import com.omilator.ui.player.SramStore
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
-import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -101,6 +100,11 @@ class MainActivity : ComponentActivity() {
             repository = LibraryRepository(AndroidLibraryScanner(applicationContext)),
             settingsStore = settingsStore,
             settingsPath = settingsPath,
+            // Built-in scan root: the app's private Documents directory.
+            // Every scan (cold start included) combines it with the user's
+            // persisted SAF directories — no separate one-off rescan that
+            // races loadSettingsAndScan() and drops configured directories.
+            defaultScanDirectories = listOf(File(filesDir, "Documents").absolutePath),
         )
         settingsViewModel = SettingsViewModel(settingsStore, settingsPath)
 
@@ -121,12 +125,6 @@ class MainActivity : ComponentActivity() {
             coreDownloader.installedCount(),
             coreDownloader.cores.size,
         )
-
-        // Auto-scan the app's private Documents directory on cold launch.
-        // ROMs in /sdcard/Download require the SAF picker — see dirPickerLauncher.
-        lifecycleScope.launch(Dispatchers.IO) {
-            libraryViewModel.rescan(listOf(File(filesDir, "Documents").absolutePath))
-        }
 
         setContent {
             val rom by remember { playingRom }

@@ -112,8 +112,7 @@ class LibtecaSourceSmokeTest {
         assertTrue(local.readBytes().contentEquals(rom), "download bytes")
 
         // Simulate a partial cache, then resume.
-        val partial = File(cache, "${file.id}.rom")
-        java.io.RandomAccessFile(partial, "rw").use { it.setLength(123_456) }
+        java.io.RandomAccessFile(local, "rw").use { it.setLength(123_456) }
         val resumed = source.downloadRom(file.id, file.size)
         assertTrue(resumed.length() == rom.size.toLong(), "resumed size")
         assertEquals("bytes=123456-", sawRange, "range resume requested")

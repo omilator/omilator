@@ -295,7 +295,9 @@ Open follow-ups from the pass (not bugs, feature/migration work):
 ## 2026-10-04 (later) — GPT-web audit pass 7 (13 findings fixed, report truncated at 13)
 
 Full-loop record in the untracked `AUDIT-CHATGPT-7.md` (inline reply was
-cut mid-finding-13; a recovery request for 14+ is pending). Headline:
+cut mid-finding-13; findings 14-16 were recovered and fixed in a second
+pass: Android cold-start default+configured scan union, server-namespaced
+ROM cache identity, exact-size cache validation). Headline:
 per-handle JNI CoreState (process-global core state removed), Android env
 support v1 negotiation + log interface + stable GET_VARIABLE storage,
 Android SRAM save/load with SHA-256 SAF identity, server tab state

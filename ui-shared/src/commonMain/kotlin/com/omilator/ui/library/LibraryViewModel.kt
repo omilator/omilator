@@ -36,6 +36,7 @@ class LibraryViewModel(
     private val repository: LibraryRepository,
     private val settingsStore: SettingsStore?,
     private val settingsPath: String,
+    private val defaultScanDirectories: List<String> = emptyList(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val _state = MutableStateFlow(LibraryUiState())
@@ -77,13 +78,16 @@ class LibraryViewModel(
     fun rescan(directories: List<String>) {
         // Cancel-and-replace with a generation tag: a slow scan of an old
         // directory set must not republish games from directories the user
-        // has since removed.
+        // has since removed. Platform-default roots (e.g. Android's private
+        // Documents) are always part of the effective set — a one-off scan
+        // without them would drop them from the displayed library.
+        val effective = (defaultScanDirectories + directories).distinct()
         val generation = ++scanGeneration
         scanJob?.cancel()
 
         // Emptying the directory list must clear the library too — the old
         // early return kept games from directories the user had removed.
-        if (directories.isEmpty()) {
+        if (effective.isEmpty()) {
             _state.value = _state.value.copy(
                 isLoading = false,
                 games = emptyList(),
@@ -95,7 +99,7 @@ class LibraryViewModel(
         scanJob = scope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
-                val games = repository.rescan(directories)
+                val games = repository.rescan(effective)
                 if (generation != scanGeneration) return@launch
                 val systems = games.map { it.system }.toSet()
                 _state.value = _state.value.copy(
@@ -115,7 +119,7 @@ class LibraryViewModel(
             val store = settingsStore ?: return@launch
             val settings = store.loadAppSettings(settingsPath)
             _state.value = _state.value.copy(scannedDirectories = settings.libraryDirectories)
-            if (settings.libraryDirectories.isNotEmpty()) rescan(settings.libraryDirectories)
+            rescan(settings.libraryDirectories)
         }
     }
 

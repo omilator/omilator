@@ -55,6 +55,13 @@ kotlin {
         commonTest.dependencies {
             implementation(kotlin("test"))
         }
+        val desktopTest by getting {
+            dependencies {
+                // LibraryViewModel's scope uses Dispatchers.Main; the swing
+                // Main dispatcher stands in for desktop tests.
+                implementation(libs.kotlinx.coroutines.swing)
+            }
+        }
     }
 }
 
