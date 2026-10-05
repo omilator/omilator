@@ -74,3 +74,6 @@ omilator-site/
 
 # --- GPT-web audit working dir ---
 /_gpt-audit/
+
+# --- audit registers stay out of history (public-repo policy) ---
+/AUDIT-CHATGPT*.md
