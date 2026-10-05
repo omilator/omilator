@@ -15,14 +15,28 @@ import java.util.zip.ZipInputStream
  */
 class AndroidCoreDownloader(private val coresDir: File) {
 
-    data class CoreEntry(val name: String, val system: String, val urlName: String)
+    /**
+     * @param name canonical local core name — installs as `<name>_libretro.so`,
+     *   which is what the launcher's core resolution looks for.
+     * @param urlName the buildbot's artifact stem; usually `<name>_libretro`
+     *   but a couple of cores (beetle_psx_hw) are uploaded under a different
+     *   name than their libretro core id.
+     * @param artifact full zip filename on the buildbot when it deviates from
+     *   `<urlName>_android.so.zip` (azahar drops the `_android` infix).
+     */
+    data class CoreEntry(
+        val name: String,
+        val system: String,
+        val urlName: String,
+        val artifact: String? = null,
+    )
 
     val cores: List<CoreEntry> = listOf(
         CoreEntry("mgba", "GB / GBC / GBA", "mgba_libretro"),
         CoreEntry("mesen", "NES", "mesen_libretro"),
         CoreEntry("snes9x", "SNES", "snes9x_libretro"),
         CoreEntry("genesis_plus_gx", "Genesis / Mega Drive", "genesis_plus_gx_libretro"),
-        CoreEntry("mednafen_psx_hw", "PS1 (accurate)", "mednafen_psx_hw_libretro"),
+        CoreEntry("beetle_psx_hw", "PS1 (accurate)", "mednafen_psx_hw_libretro"),
         CoreEntry("pcsx_rearmed", "PS1 (fast)", "pcsx_rearmed_libretro"),
         CoreEntry("melonds", "DS", "melonds_libretro"),
         CoreEntry("mednafen_saturn", "Saturn", "mednafen_saturn_libretro"),
@@ -32,10 +46,13 @@ class AndroidCoreDownloader(private val coresDir: File) {
         CoreEntry("fbneo", "Arcade", "fbneo_libretro"),
         CoreEntry("picodrive", "Genesis / 32X", "picodrive_libretro"),
         CoreEntry("mupen64plus_next", "N64 (software render)", "mupen64plus_next_libretro"),
+        CoreEntry("azahar", "3DS", "azahar_libretro", artifact = "azahar_libretro.so.zip"),
+        CoreEntry("play", "PS2", "play_libretro"),
         // PSP/GC/Wii/Dreamcast: available on buildbot but require Vulkan
         // (Android has native Vulkan — no MoltenVK needed). Untested.
         CoreEntry("ppsspp", "PSP (Vulkan)", "ppsspp_libretro"),
         CoreEntry("flycast", "Dreamcast (Vulkan)", "flycast_libretro"),
+        CoreEntry("dolphin", "GameCube / Wii (Vulkan)", "dolphin_libretro"),
     )
 
     // Current buildbot layout is /android/latest/<abi>/, and artifacts carry
@@ -65,7 +82,8 @@ class AndroidCoreDownloader(private val coresDir: File) {
             return true
         }
 
-        val zipUrl = "$buildbotBase/${entry.urlName}_android.so.zip"
+        val zipName = entry.artifact ?: "${entry.urlName}_android.so.zip"
+        val zipUrl = "$buildbotBase/$zipName"
         onProgress("Downloading $soName...")
         return try {
             val conn = URL(zipUrl).openConnection() as HttpURLConnection
@@ -77,9 +95,10 @@ class AndroidCoreDownloader(private val coresDir: File) {
                 return false
             }
             // Only the exact expected archive member counts — the artifacts
-            // carry <core>_libretro_android.so, and a stray helper .so must
-            // not be installed as the requested core.
-            val expectedMember = "${entry.urlName}_android.so"
+            // carry the zip's own stem as the .so name (azahar drops the
+            // `_android` infix), and a stray helper .so must not be installed
+            // as the requested core.
+            val expectedMember = zipName.removeSuffix(".zip")
             ZipInputStream(conn.inputStream).use { zis ->
                 var entry2 = zis.nextEntry
                 while (entry2 != null) {

@@ -47,6 +47,7 @@ class LibtecaServerConnection(
                                 platformTag = ed.format.removePrefix("game-"),
                                 platformName = ed.title,
                                 fileSizeBytes = file.size,
+                                sha256 = file.sha256,
                             ),
                         )
                     }
@@ -62,7 +63,7 @@ class LibtecaServerConnection(
         onProgress: (Float) -> Unit,
     ): File? = try {
         kotlinx.coroutines.runBlocking {
-            source.downloadRom(game.fileId, game.fileSizeBytes) { bytes, total ->
+            source.downloadRom(game.fileId, game.fileSizeBytes, game.sha256) { bytes, total ->
                 if (total > 0) onProgress(bytes.toFloat() / total)
             }
         }

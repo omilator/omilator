@@ -48,6 +48,11 @@ fun RootViewController(): UIViewController {
         repository = LibraryRepository(IosLibraryScanner()),
         settingsStore = settingsStore,
         settingsPath = settingsPath,
+        // Built-in scan root: Documents is re-scanned on every scan (cold
+        // start included) as a union with the persisted directories — no
+        // separate one-off rescan racing loadSettingsAndScan() and dropping
+        // configured directories (same fix as Android's MainActivity).
+        defaultScanDirectories = listOf(documentsDir),
     )
     val settingsViewModel = SettingsViewModel(settingsStore, settingsPath).apply {
         // Pre-populate installed/total so the Settings UI reflects reality
@@ -63,13 +68,7 @@ fun RootViewController(): UIViewController {
         settingsViewModel.setDirectories(settings.libraryDirectories)
     }
 
-    // Initial scan — defer to loadSettingsAndScan() when persistence is set,
-    // but iOS always re-scans Documents on cold launch regardless (cheap,
-    // and ROMs come/go via Files app outside our control).
     val rootScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    rootScope.launch {
-        libraryViewModel.rescan(listOf("Documents"))
-    }
 
     // Wire core download UI updates. Each onProgress callback from
     // downloadAll() flows into the SettingsViewModel so the user sees

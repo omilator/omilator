@@ -284,13 +284,19 @@ hashing, idempotent teardown, GH-release asset parser, CI startup marker.
 
 Open follow-ups from the pass (not bugs, feature/migration work):
 
-- **F3 remainder:** `beetle_psx_hw`, `play`, `azahar`, `dolphin` have no
-  entry in `AndroidCoreDownloader` — those ROMs now surface "Core not
-  installed" honestly; add the cores to the Android download list.
-- **F9 remainder:** Linux/Windows file locations moved to XDG /
-  `%APPDATA%` with no migration of old settings/SRAM; macOS paths are
-  byte-identical. Decide whether a one-time migration is wanted before any
-  Linux/Windows release.
+- **F3 remainder (CLOSED 2026-10-04):** all four cores added to
+  `AndroidCoreDownloader`. Reality notes: the buildbot artifact for
+  `beetle_psx_hw` is published as `mednafen_psx_hw` (entry maps
+  urlName→core id; the dead pre-existing `mednafen_psx_hw` entry was
+  replaced rather than duplicated), and `azahar`'s zip drops the `_android`
+  infix (CoreEntry gained an optional `artifact` field). NEW open item:
+  the DESKTOP macOS `beetle_psx_hw_libretro` entry 404s for the same
+  reason (osx buildbot publishes `mednafen_psx_hw`) - not yet fixed.
+- **F9 remainder (DECIDED 2026-10-04: no migration, by design):** the
+  legacy cache key carried no server identity, so a "migration" could not
+  know which server a legacy cache file belonged to — the ambiguity is
+  why the scheme changed. Old ROM caches re-download once; pre-release
+  Linux/Windows path breakage is accepted. Do not add migration code.
 
 ## 2026-10-04 (later) — GPT-web audit pass 7 (13 findings fixed, report truncated at 13)
 
@@ -306,3 +312,13 @@ detail fetching, refresh/scan race guards, IO-dispatcher installs, atomic
 core downloads with exact-member ZIP validation, run-ahead rollback
 fallback, lifecycle-tied player launch. Desktop test 7/7, Android
 Kotlin+JNI builds, iOS compile all green.
+
+
+## 2026-10-04 (final) — decision pass: iOS rescan race + ROM checksums
+
+- iOS `RootViewController` now uses the same `defaultScanDirectories`
+  constructor pattern as Android (cold-start rescan race fixed; the old
+  racing block passed a relative path that was broken anyway).
+- ROM downloads verify server-provided `sha256` (optional field; absent =
+  size-only as before; mismatch truncates the cache and re-downloads).
+  Server side landed in libteca (games payload + contract update).

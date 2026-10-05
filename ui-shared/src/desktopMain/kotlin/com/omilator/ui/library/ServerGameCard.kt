@@ -58,6 +58,7 @@ data class ServerGame(
     val platformTag: String,
     val platformName: String,
     val fileSizeBytes: Long,
+    val sha256: String? = null,
 ) {
     val system: GameSystem? get() = gameSystemFromPlatformTag(platformTag)
 }

@@ -96,7 +96,7 @@ class LibtecaLibrarySource(
     )
 
     @Serializable
-    data class FileDetail(val id: Long, val size: Long = 0)
+    data class FileDetail(val id: Long, val size: Long = 0, val sha256: String? = null)
 
     @Serializable
     data class ProgressPayload(val position: Double = 0.0)
@@ -151,11 +151,14 @@ class LibtecaLibrarySource(
     /**
      * Downloads a ROM into cacheDir/<serverKey>/<fileId>-<size>.rom with
      * Range resume, keyed on server identity + the stable file id + size
-     * per the contract. Returns the local file.
+     * per the contract. Returns the local file. When the server payload
+     * provided a [sha256], the completed bytes are verified against it and
+     * a mismatch fails the download with the cache truncated to zero.
      */
     suspend fun downloadRom(
         fileId: Long,
         size: Long,
+        sha256: String? = null,
         onProgress: ProgressListener? = null,
     ): File = withContext(Dispatchers.IO) {
         val dst = File(serverCacheDir.apply { mkdirs() }, "$fileId-$size.rom")
@@ -215,6 +218,29 @@ class LibtecaLibrarySource(
                     require(out.length() == size) {
                         "stream: downloaded ${out.length()} bytes, expected $size"
                     }
+                }
+            }
+            if (sha256 != null) {
+                val digest = MessageDigest.getInstance("SHA-256")
+                dst.inputStream().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        digest.update(buf, 0, n)
+                    }
+                }
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }
+                val expected = sha256.trim()
+                val matches = actual.equals(expected, ignoreCase = true)
+                if (!matches) {
+                    // Same treatment as any other corrupted cache entry:
+                    // drop the bytes so a retry re-downloads from zero
+                    // instead of resuming bad ones.
+                    java.io.RandomAccessFile(dst, "rw").use { it.setLength(0) }
+                }
+                require(matches) {
+                    "stream: sha256 mismatch for file $fileId: expected $expected, got $actual"
                 }
             }
             dst
