@@ -25,17 +25,19 @@ class LibtecaServerConnection(
                 val works = source.works(lib.id, limit = 200, offset = page * 200)
                 if (works.isEmpty()) break
                 for (work in works) {
+                    // One detail request per work: the file ids are the same
+                    // for every edition, so per-edition fetches multiplied
+                    // HTTP traffic by the edition count.
+                    val detail = try {
+                        source.work(work.id)
+                    } catch (_: Exception) {
+                        null
+                    } ?: continue
+                    val filesByEdition = detail.editions.associateBy { it.id }
                     for (ed in work.editions) {
                         // Strip "game-" prefix; skip non-game formats defensively
                         if (!ed.format.startsWith("game-")) continue
-                        val detail = try {
-                            source.work(work.id)
-                        } catch (_: Exception) {
-                            null
-                        }
-                        val file = detail?.editions
-                            ?.firstOrNull { it.id == ed.id }
-                            ?.files?.firstOrNull() ?: continue
+                        val file = filesByEdition[ed.id]?.files?.firstOrNull() ?: continue
                         games.add(
                             ServerGame(
                                 workId = work.id,
@@ -76,5 +78,11 @@ class LibtecaServerConnection(
                 }
             } catch (_: Exception) {}
         }.start()
+    }
+
+    override fun playtimePosition(editionId: Long): Int = try {
+        source.playtimePosition(editionId)
+    } catch (_: Exception) {
+        0
     }
 }

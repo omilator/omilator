@@ -41,6 +41,9 @@ class LibraryViewModel(
     private val _state = MutableStateFlow(LibraryUiState())
     val state: StateFlow<LibraryUiState> = _state.asStateFlow()
 
+    private var scanJob: kotlinx.coroutines.Job? = null
+    private var scanGeneration = 0L
+
     init {
         loadSettingsAndScan()
     }
@@ -72,6 +75,12 @@ class LibraryViewModel(
     fun rescan() = rescan(_state.value.scannedDirectories)
 
     fun rescan(directories: List<String>) {
+        // Cancel-and-replace with a generation tag: a slow scan of an old
+        // directory set must not republish games from directories the user
+        // has since removed.
+        val generation = ++scanGeneration
+        scanJob?.cancel()
+
         // Emptying the directory list must clear the library too — the old
         // early return kept games from directories the user had removed.
         if (directories.isEmpty()) {
@@ -83,10 +92,11 @@ class LibraryViewModel(
             )
             return
         }
-        scope.launch {
+        scanJob = scope.launch {
             _state.value = _state.value.copy(isLoading = true, error = null)
             try {
                 val games = repository.rescan(directories)
+                if (generation != scanGeneration) return@launch
                 val systems = games.map { it.system }.toSet()
                 _state.value = _state.value.copy(
                     isLoading = false,
@@ -94,6 +104,7 @@ class LibraryViewModel(
                     selectedSystem = _state.value.selectedSystem?.takeIf { it in systems },
                 )
             } catch (t: Throwable) {
+                if (generation != scanGeneration) return@launch
                 _state.value = _state.value.copy(isLoading = false, error = t.message ?: "Scan failed")
             }
         }

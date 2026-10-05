@@ -66,8 +66,12 @@ class LibtecaSourceSmokeTest {
             ex.close()
         }
         server.createContext("/api/core/progress/100") { ex ->
-            progressBody = ex.requestBody.readBytes().decodeToString()
-            ex.respond(200, """{"ok":true}""")
+            if (ex.requestMethod == "GET") {
+                ex.respond(200, """{"editionId":100,"position":3600,"isFinished":false,"revision":0}""")
+            } else {
+                progressBody = ex.requestBody.readBytes().decodeToString()
+                ex.respond(200, """{"ok":true}""")
+            }
         }
         server.start()
         source = LibtecaLibrarySource(
@@ -114,6 +118,11 @@ class LibtecaSourceSmokeTest {
         assertTrue(resumed.length() == rom.size.toLong(), "resumed size")
         assertEquals("bytes=123456-", sawRange, "range resume requested")
         assertTrue(resumed.readBytes().contentEquals(rom), "resumed bytes identical")
+
+        // Cumulative playtime: the stored position is fetched first so the
+        // client can add the session duration before POSTing the sum.
+        assertEquals(3600, source.playtimePosition(100), "stored playtime position")
+        assertEquals(0, source.playtimePosition(999), "unknown edition reads as zero")
 
         assertTrue(source.reportPlaytime(100, 42))
         assertTrue(progressBody!!.contains("\"position\":42"), "progress body: $progressBody")

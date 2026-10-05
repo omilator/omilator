@@ -40,7 +40,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -86,26 +88,46 @@ class ServerLibraryViewModel(
         fun listGames(): List<ServerGame>
         fun downloadRom(game: ServerGame, onProgress: (Float) -> Unit): File?
         fun playtime(editionId: Long, seconds: Int)
+        /** Current playtime position (seconds played) for an edition, or 0. */
+        fun playtimePosition(editionId: Long): Int
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
 
+    private var refreshJob: Job? = null
+    private var refreshGeneration = 0
+
     fun refresh() {
+        // Cancel-and-replace: a slow earlier refresh must not publish stale
+        // games (or stale-credential errors) over a newer one's results.
+        refreshJob?.cancel()
+        val generation = ++refreshGeneration
         _state.value = _state.value.copy(isLoading = true, error = null)
-        scope.launch(Dispatchers.IO) {
+        refreshJob = scope.launch(Dispatchers.IO) {
             try {
                 val conn = connect() ?: run {
-                    _state.value = _state.value.copy(isLoading = false, error = "Not configured")
+                    if (generation == refreshGeneration) {
+                        _state.value = _state.value.copy(isLoading = false, error = "Not configured")
+                    }
                     return@launch
                 }
                 val games = conn.listGames()
-                _state.value = _state.value.copy(isLoading = false, games = games)
+                if (generation == refreshGeneration) {
+                    _state.value = _state.value.copy(isLoading = false, games = games)
+                }
             } catch (e: Exception) {
-                _state.value = _state.value.copy(isLoading = false, error = e.message ?: "Connection failed")
+                if (generation == refreshGeneration) {
+                    _state.value = _state.value.copy(isLoading = false, error = e.message ?: "Connection failed")
+                }
             }
         }
+    }
+
+    /** Cancels the private scope when the owning screen discards this VM. */
+    fun close() {
+        scope.cancel()
     }
 
     fun setSearch(q: String) {
@@ -161,11 +183,18 @@ class ServerLibraryViewModel(
         _state.update { s -> s.copy(downloads = s.downloads - fileId) }
     }
 
-    fun reportPlaytime(game: ServerGame, seconds: Int) {
+    fun reportPlaytime(game: ServerGame, sessionSeconds: Int) {
         if (_state.value.downloads[game.fileId]?.localFile == null) return
         scope.launch(Dispatchers.IO) {
             try {
-                connect()?.playtime(game.editionId, seconds)
+                val conn = connect() ?: return@launch
+                // The server's progress position is a cumulative play-seconds
+                // counter set by the POST, so the session duration adds onto
+                // the stored position. Capped just under the server's 30-day
+                // policy limit for editions without a known duration.
+                val existing = conn.playtimePosition(game.editionId)
+                val total = (existing + sessionSeconds).coerceAtMost(30 * 24 * 60 * 60 - 1)
+                conn.playtime(game.editionId, total)
             } catch (_: Exception) {}
         }
     }

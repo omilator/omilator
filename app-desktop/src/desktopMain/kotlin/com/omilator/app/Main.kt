@@ -11,11 +11,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -54,6 +56,7 @@ import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
@@ -65,7 +68,16 @@ fun main() = application {
         position = WindowPosition(Alignment.Center),
     )
 
-    var playing by remember { mutableStateOf<String?>(null) }
+    /** A playing session tracks which ROM is up, which server game (if any)
+     *  it belongs to, and when it started — server playtime is reported with
+     *  the real session duration when the player exits. */
+    data class PlayingSession(
+        val romPath: String,
+        val serverGame: ServerGame? = null,
+        val startedAtNanos: Long = System.nanoTime(),
+    )
+
+    var playing by remember { mutableStateOf<PlayingSession?>(null) }
 
     val configDir = remember { defaultConfigDir() }
     val settingsPath = remember { File(configDir, "settings.json").absolutePath }
@@ -87,7 +99,15 @@ fun main() = application {
 
     // Libteca server library (PLAN-GAMES G4): the Server page appears as the
     // last tab in the library pager when a server is configured in Settings.
-    val serverViewModel = remember {
+    // Derived from collected settings state, so configuring/removing a
+    // server after startup adds/removes the tab on the spot.
+    val settingsState by settingsViewModel.state.collectAsState()
+    val serverConfigured = settingsState.libtecaServerUrl.isNotBlank() &&
+        settingsState.libtecaServerToken.isNotBlank()
+
+    // Fresh view-model per server configuration: switching servers must not
+    // show the old server's games/downloads under new credentials.
+    val serverViewModel = remember(settingsState.libtecaServerUrl, settingsState.libtecaServerToken) {
         ServerLibraryViewModel(connect = {
             val url = settingsViewModel.state.value.libtecaServerUrl.trim()
             val tok = settingsViewModel.state.value.libtecaServerToken.trim()
@@ -95,19 +115,29 @@ fun main() = application {
             else LibtecaServerConnection(url, tok, File(configDir, "rom-cache"))
         })
     }
-    val serverPage = remember<(@Composable () -> Unit)?> {
-        if (settingsViewModel.state.value.libtecaServerUrl.isNotBlank()) {
-            {
-                ServerLibrarySection(
-                    viewModel = serverViewModel,
-                    onPlayGame = { file, game ->
-                        playRom(file.absolutePath) { romPath -> playing = romPath }
-                        serverViewModel.reportPlaytime(game, 0)
-                    },
-                )
-            }
-        } else null
+    DisposableEffect(settingsState.libtecaServerUrl, settingsState.libtecaServerToken) {
+        onDispose { serverViewModel.close() }
     }
+    val stopPlaying = {
+        val session = playing
+        if (session != null) {
+            val seconds = ((System.nanoTime() - session.startedAtNanos) / 1_000_000_000L)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
+            session.serverGame?.let { serverViewModel.reportPlaytime(it, seconds) }
+            playing = null
+        }
+    }
+    val serverPage: (@Composable () -> Unit)? = if (serverConfigured) {
+        {
+            ServerLibrarySection(
+                viewModel = serverViewModel,
+                onPlayGame = { file, game ->
+                    playRom(file.absolutePath) { romPath -> playing = PlayingSession(romPath, game) }
+                },
+            )
+        }
+    } else null
 
     // Load persisted settings on startup
     kotlinx.coroutines.runBlocking {
@@ -135,33 +165,35 @@ fun main() = application {
     // Run the auto-download
     LaunchedEffect(Unit) {
         if (!setupNeeded) return@LaunchedEffect
-        val totalSteps = coresMissing + emulatorsMissing
-        var done = 0
+        withContext(Dispatchers.IO) {
+            val totalSteps = coresMissing + emulatorsMissing
+            var done = 0
 
-        // Cores first
-        for (entry in coreDownloader.cores) {
-            if (!coreDownloader.isInstalled(entry)) {
-                setupStatus = "Downloading ${entry.name} (${entry.system})..."
-                coreDownloader.download(entry) { }
-                done++
-                setupProgress = done.toFloat() / totalSteps
+            // Cores first
+            for (entry in coreDownloader.cores) {
+                if (!coreDownloader.isInstalled(entry)) {
+                    setupStatus = "Downloading ${entry.name} (${entry.system})..."
+                    coreDownloader.download(entry) { }
+                    done++
+                    setupProgress = done.toFloat() / totalSteps
+                }
             }
-        }
 
-        // Then emulators
-        for (spec in emulatorInstaller.emulators) {
-            if (!emulatorInstaller.isInstalled(spec)) {
-                setupStatus = "Downloading ${spec.displayName}..."
-                emulatorInstaller.install(spec) { msg -> setupStatus = msg }
-                done++
-                setupProgress = done.toFloat() / totalSteps
+            // Then emulators
+            for (spec in emulatorInstaller.emulators) {
+                if (!emulatorInstaller.isInstalled(spec)) {
+                    setupStatus = "Downloading ${spec.displayName}..."
+                    emulatorInstaller.install(spec) { msg -> setupStatus = msg }
+                    done++
+                    setupProgress = done.toFloat() / totalSteps
+                }
             }
-        }
 
-        setupStatus = "Setup complete"
-        settingsViewModel.setCoresStatus(coreDownloader.installedCount(), coreDownloader.cores.size)
-        settingsViewModel.setEmulatorsStatus(emulatorInstaller.installedCount(), emulatorInstaller.emulators.size)
-        setupNeeded = false
+            setupStatus = "Setup complete"
+            settingsViewModel.setCoresStatus(coreDownloader.installedCount(), coreDownloader.cores.size)
+            settingsViewModel.setEmulatorsStatus(emulatorInstaller.installedCount(), emulatorInstaller.emulators.size)
+            setupNeeded = false
+        }
     }
 
     val onAddRomDirectory: () -> Unit = {
@@ -179,8 +211,8 @@ fun main() = application {
         // Startup marker for the CI smoke test: proves the Compose window
         // actually initialized, not just that the JVM process survived.
         LaunchedEffect(Unit) { println("OMILATOR_STARTUP_OK") }
-        val romPath = playing
-        if (romPath != null) {
+        val session = playing
+        if (session != null) {
             OmilatorTheme {
                 Box(
                     modifier = Modifier
@@ -188,14 +220,14 @@ fun main() = application {
                         .background(Color.Black)
                         .onKeyEvent { event ->
                             if (event.type == KeyEventType.KeyUp && event.key == Key.Escape) {
-                                playing = null
+                                stopPlaying()
                                 true
                             } else false
                         },
                 ) {
                     PlayerScreen(
-                        gameId = romPath,
-                        onClose = { playing = null },
+                        gameId = session.romPath,
+                        onClose = stopPlaying,
                     )
                 }
             }
@@ -206,9 +238,9 @@ fun main() = application {
                 settingsViewModel = settingsViewModel,
                 onAddRomDirectory = onAddRomDirectory,
                 isDesktop = true,
-                onPlayRom = { path -> playRom(path) { romPath -> playing = romPath } },
+                onPlayRom = { path -> playRom(path) { romPath -> playing = PlayingSession(romPath) } },
                 onQuickPlay = {
-                    pickRomFile()?.let { path -> playRom(path) { romPath -> playing = romPath } }
+                    pickRomFile()?.let { path -> playRom(path) { romPath -> playing = PlayingSession(romPath) } }
                 },
                 onLaunchStandalone = {
                     pickRomFile()?.let { path -> launchStandalone(path) }

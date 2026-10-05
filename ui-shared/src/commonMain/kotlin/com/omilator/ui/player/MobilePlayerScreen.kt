@@ -26,11 +26,11 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,7 +55,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.atomicfu.atomic
 import kotlin.math.abs
@@ -70,6 +69,16 @@ private const val DPAD_LEFT = 6
 private const val DPAD_RIGHT = 7
 
 /**
+ * Battery-backed SRAM persistence: restore after loadGame, flush before
+ * unloadGame. Implemented by the platform (Android: java.io under the
+ * app's saves directory with a stable per-ROM identity).
+ */
+interface SramStore {
+    fun read(): ByteArray?
+    fun write(data: ByteArray)
+}
+
+/**
  * Shared mobile player screen for iOS + Android. Renders the emulator
  * framebuffer to a Compose Canvas and overlays a handheld-style touch
  * controller (D-pad + A/B + Start/Select). Uses Compose Multiplatform
@@ -80,6 +89,8 @@ private const val DPAD_RIGHT = 7
  *    (dlopen+cinterop on iOS, JNI on Android).
  *  - [audioOutput] — created via expect/actual `createAudioOutputFactory`
  *    (AVAudioEngine on iOS, AudioTrack on Android).
+ *  - [sramStore] — optional battery-save persistence; without it,
+ *    RETRO_MEMORY_SAVE_RAM content is lost when the session ends.
  *
  * Multi-touch: per-pointer tracking via `awaitEachGesture`. The D-pad is
  * a single touch surface that computes direction from offset (10dp deadzone).
@@ -92,6 +103,7 @@ fun MobilePlayerScreen(
     corePath: String,
     coreController: CoreController,
     audioOutput: AudioOutput,
+    sramStore: SramStore? = null,
     onExit: () -> Unit = {},
 ) {
     var isLoading by remember { mutableStateOf(true) }
@@ -100,7 +112,6 @@ fun MobilePlayerScreen(
     var frameW by remember { mutableStateOf(0) }
     var frameH by remember { mutableStateOf(0) }
 
-    val scope = rememberCoroutineScope()
     val buttonStates = remember { mutableStateMapOf<Int, Boolean>() }
 
     // Input as atomics: the core thread reads these from its input callback.
@@ -112,11 +123,16 @@ fun MobilePlayerScreen(
         if (pressed) buttonStates[id] = true else buttonStates.remove(id)
     }
 
-    remember {
-        scope.launch(Dispatchers.Default) {
+    // Keyed to the session inputs: a changed ROM/core in the same
+    // composition cancels the old loop instead of leaking it.
+    LaunchedEffect(romPath, corePath) {
+        withContext(Dispatchers.Default) {
             try {
                 coreController.loadCore(corePath)
                 val avInfo = coreController.loadGame(romPath)
+                sramStore?.read()?.let { saved ->
+                    if (saved.isNotEmpty()) runCatching { coreController.writeSaveRam(saved) }
+                }
                 frameW = avInfo.geometry.baseWidth.toInt()
                 frameH = avInfo.geometry.baseHeight.toInt()
                 audioOutput.configure(avInfo.timing.sampleRate, channels = 2)
@@ -155,6 +171,13 @@ fun MobilePlayerScreen(
                 // and the core MUST still be unloaded rather than left
                 // running with dangling callbacks.
                 withContext(NonCancellable + Dispatchers.Default) {
+                    // SRAM flush precedes unload: retro_unload_game is where
+                    // some cores hand the final battery block back.
+                    runCatching {
+                        sramStore?.let { store ->
+                            coreController.readSaveRam().takeIf { it.isNotEmpty() }?.let(store::write)
+                        }
+                    }
                     runCatching { coreController.detach() }
                     runCatching { coreController.unloadGame() }
                     runCatching { coreController.unloadCore() }
@@ -162,7 +185,6 @@ fun MobilePlayerScreen(
                 }
             }
         }
-        true
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0D0D12))) {

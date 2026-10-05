@@ -71,6 +71,9 @@ class LibtecaLibrarySource(
     @Serializable
     data class FileDetail(val id: Long, val size: Long = 0)
 
+    @Serializable
+    data class ProgressPayload(val position: Double = 0.0)
+
     /** Games libraries on the server, in server order. */
     fun gamesLibraries(): List<Library> {
         val conn = URL(baseUrl.trimEnd('/') + "/api/core/libraries").openAuthed()
@@ -179,6 +182,19 @@ class LibtecaLibrarySource(
             conn.disconnect()
         }
     }
+
+    /** Current playtime position (seconds played) for an edition; 0 when
+     *  the server has none recorded or the call fails. */
+    fun playtimePosition(editionId: Long): Int = try {
+        val u = URL(baseUrl.trimEnd('/') + "/api/core/progress/$editionId")
+        val conn = u.openAuthed()
+        val body = conn.inputStream.use { it.readBytes() }
+        val code = conn.responseCode
+        conn.disconnect()
+        if (code == 200) {
+            json.decodeFromString<ProgressPayload>(body.decodeToString()).position.toInt()
+        } else 0
+    } catch (_: Exception) { 0 }
 
     /** Reports play seconds back as the contract's progress position. */
     suspend fun reportPlaytime(editionId: Long, secondsPlayed: Int): Boolean = withContext(Dispatchers.IO) {

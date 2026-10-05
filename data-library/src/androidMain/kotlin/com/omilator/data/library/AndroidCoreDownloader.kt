@@ -48,7 +48,7 @@ class AndroidCoreDownloader(private val coresDir: File) {
     private val buildbotBase = "https://buildbot.libretro.com/nightly/android/latest/$abi"
 
     fun isInstalled(entry: CoreEntry): Boolean =
-        File(coresDir, "${entry.name}_libretro.so").exists()
+        File(coresDir, "${entry.name}_libretro.so").let { it.exists() && it.length() > 0 }
 
     fun installedCount(): Int = cores.count { isInstalled(it) }
 
@@ -59,8 +59,8 @@ class AndroidCoreDownloader(private val coresDir: File) {
     fun download(entry: CoreEntry, onProgress: (String) -> Unit = {}): Boolean {
         coresDir.mkdirs()
         val soName = "${entry.name}_libretro.so"
-        val existing = File(coresDir, soName)
-        if (existing.exists()) {
+        val finalFile = File(coresDir, soName)
+        if (isInstalled(entry)) {
             onProgress("$soName already installed")
             return true
         }
@@ -76,19 +76,44 @@ class AndroidCoreDownloader(private val coresDir: File) {
                 conn.disconnect()
                 return false
             }
+            // Only the exact expected archive member counts — the artifacts
+            // carry <core>_libretro_android.so, and a stray helper .so must
+            // not be installed as the requested core.
+            val expectedMember = "${entry.urlName}_android.so"
             ZipInputStream(conn.inputStream).use { zis ->
                 var entry2 = zis.nextEntry
                 while (entry2 != null) {
-                    if (entry2.name.endsWith(".so")) {
-                        // The archive member is <core>_libretro_android.so;
-                        // every consumer (isInstalled, the launcher's core
+                    if (File(entry2.name).name == expectedMember) {
+                        // Every consumer (isInstalled, the launcher's core
                         // resolution) looks for the canonical <core>_libretro.so,
-                        // so the extract lands under the canonical name.
-                        val outFile = File(coresDir, soName)
-                        outFile.outputStream().use { output -> zis.copyTo(output) }
-                        onProgress("Installed $soName (${outFile.length() / 1024}KB)")
-                        conn.disconnect()
-                        return true
+                        // so the extract lands under the canonical name — via
+                        // a temp sibling so an interrupted download cannot
+                        // leave a truncated core at the final name.
+                        val tmp = File(coresDir, ".$soName.part")
+                        try {
+                            tmp.outputStream().use { output -> zis.copyTo(output) }
+                            if (tmp.length() == 0L) {
+                                onProgress("Failed: empty core archive member")
+                                return false
+                            }
+                            try {
+                                java.nio.file.Files.move(
+                                    tmp.toPath(), finalFile.toPath(),
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                                )
+                            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                                java.nio.file.Files.move(
+                                    tmp.toPath(), finalFile.toPath(),
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                                )
+                            }
+                            onProgress("Installed $soName (${finalFile.length() / 1024}KB)")
+                            conn.disconnect()
+                            return true
+                        } finally {
+                            tmp.delete()
+                        }
                     }
                     entry2 = zis.nextEntry
                 }

@@ -22,6 +22,7 @@ import com.omilator.data.settings.SettingsStore
 import com.omilator.ui.OmilatorApp
 import com.omilator.ui.library.LibraryViewModel
 import com.omilator.ui.player.MobilePlayerScreen
+import com.omilator.ui.player.SramStore
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
 import androidx.lifecycle.lifecycleScope
@@ -40,6 +41,13 @@ class MainActivity : ComponentActivity() {
      */
     private val playingRom = mutableStateOf<String?>(null)
     private val playingCore = mutableStateOf<String?>(null)
+
+    /**
+     * Stable identity of the playing ROM: the original picked path, NOT the
+     * SAF-materialized cache filename — SRAM must key on the same content
+     * URI across sessions, not on a per-copy cache path.
+     */
+    private val playingRomIdentity = mutableStateOf<String?>(null)
 
     /**
      * SAF directory picker. Android requires the Storage Access Framework for
@@ -122,6 +130,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val rom by remember { playingRom }
+            val romIdentity by remember { playingRomIdentity }
             val core by remember { playingCore }
             val downloadScope = rememberCoroutineScope()
 
@@ -130,13 +139,22 @@ class MainActivity : ComponentActivity() {
                 // + audio get clean state. onExit returns to library.
                 val coreController = remember { createCoreController(libretroDir.absolutePath) }
                 val audioOutput = remember { createAudioOutputFactory().create() }
+                val sramStore = remember(rom, romIdentity) {
+                    MobileSramStore(
+                        savesDir = File(filesDir, "saves"),
+                        romPath = rom ?: "",
+                        romIdentity = romIdentity ?: rom ?: "",
+                    )
+                }
                 MobilePlayerScreen(
                     romPath = rom!!,
                     corePath = core!!,
                     coreController = coreController,
                     audioOutput = audioOutput,
+                    sramStore = sramStore,
                     onExit = {
                         playingRom.value = null
+                        playingRomIdentity.value = null
                         playingCore.value = null
                     },
                 )
@@ -181,6 +199,7 @@ class MainActivity : ComponentActivity() {
                             if (resolved != null) {
                                 playingCore.value = resolved
                                 playingRom.value = playPath
+                                playingRomIdentity.value = path
                             } else {
                                 runOnUiThread {
                                     android.widget.Toast.makeText(
@@ -223,5 +242,44 @@ class MainActivity : ComponentActivity() {
         val ext = path.substringAfterLast('.', "")
         val system = com.omilator.data.library.GameSystem.detectByExtension(ext) ?: return null
         return "${system.preferredCore}_libretro"
+    }
+}
+
+/**
+ * Battery-save persistence with the same identity scheme as the desktop
+ * engine: sanitized basename + SHA-256 of a stable ROM identity (the
+ * original picked path, so SAF ROMs key on their content URI), and atomic
+ * replacement so a crash mid-write cannot corrupt the only durable save.
+ */
+private class MobileSramStore(
+    savesDir: File,
+    romPath: String,
+    romIdentity: String,
+) : SramStore {
+    private val dir = savesDir.apply { mkdirs() }
+    private val file: File
+
+    init {
+        val base = File(romPath).nameWithoutExtension.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val id = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(romIdentity.encodeToByteArray())
+            .take(8)
+            .joinToString("") { "%02x".format(it) }
+        file = File(dir, "$base-$id.srm")
+    }
+
+    override fun read(): ByteArray? = file.takeIf { it.exists() }?.readBytes()
+
+    override fun write(data: ByteArray) {
+        val tmp = File(dir, ".arcade-tmp-sram")
+        tmp.writeBytes(data)
+        try {
+            java.nio.file.Files.move(tmp.toPath(), file.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+            java.nio.file.Files.move(tmp.toPath(), file.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 }

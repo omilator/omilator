@@ -46,9 +46,10 @@ class CoreDownloader(private val targetDir: File) {
 
     private val buildbotBase = "https://buildbot.libretro.com/nightly/${platform.buildbotPath}/latest"
 
-    /** Returns true if a core library already exists in targetDir. */
+    /** Returns true if a core library already exists in targetDir. A
+     *  zero-length file is a truncated install, not an installed core. */
     fun isInstalled(entry: CoreEntry): Boolean =
-        File(targetDir, "${entry.name}.${platform.coreExt}").exists()
+        File(targetDir, "${entry.name}.${platform.coreExt}").let { it.exists() && it.length() > 0 }
 
     /** Count of installed cores. */
     fun installedCount(): Int = cores.count { isInstalled(it) }
@@ -59,8 +60,8 @@ class CoreDownloader(private val targetDir: File) {
      */
     fun download(entry: CoreEntry, onProgress: (String) -> Unit = {}): Boolean {
         val libName = "${entry.name}.${platform.coreExt}"
-        val existingFile = File(targetDir, libName)
-        if (existingFile.exists()) {
+        val finalFile = File(targetDir, libName)
+        if (isInstalled(entry)) {
             onProgress("$libName already installed")
             return true
         }
@@ -77,15 +78,42 @@ class CoreDownloader(private val targetDir: File) {
                 conn.disconnect()
                 return false
             }
+            // Only the member carrying the exact expected library name
+            // counts — a helper library bundled in the archive must not be
+            // installed (and reported) as the requested core.
+            val expectedMember = libName
             ZipInputStream(conn.inputStream).use { zis ->
                 var entry2 = zis.nextEntry
                 while (entry2 != null) {
-                    if (entry2.name.endsWith(".${platform.coreExt}")) {
-                        val outFile = File(targetDir, File(entry2.name).name)
-                        outFile.outputStream().use { output -> zis.copyTo(output) }
-                        onProgress("Installed $libName (${outFile.length() / 1024}KB)")
-                        conn.disconnect()
-                        return true
+                    if (File(entry2.name).name == expectedMember) {
+                        // Extract to a temp sibling and swap in atomically: a
+                        // truncated core left at the final name would be
+                        // treated as installed forever.
+                        val tmp = File(targetDir, ".$libName.part")
+                        try {
+                            tmp.outputStream().use { output -> zis.copyTo(output) }
+                            if (tmp.length() == 0L) {
+                                onProgress("Failed: empty core archive member")
+                                return false
+                            }
+                            try {
+                                java.nio.file.Files.move(
+                                    tmp.toPath(), finalFile.toPath(),
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                                )
+                            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                                java.nio.file.Files.move(
+                                    tmp.toPath(), finalFile.toPath(),
+                                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                                )
+                            }
+                            onProgress("Installed $libName (${finalFile.length() / 1024}KB)")
+                            conn.disconnect()
+                            return true
+                        } finally {
+                            tmp.delete()
+                        }
                     }
                     entry2 = zis.nextEntry
                 }

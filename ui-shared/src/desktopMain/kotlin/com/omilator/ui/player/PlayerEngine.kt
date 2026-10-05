@@ -255,12 +255,23 @@ class PlayerEngine(
             if (runAhead > 0) {
                 try {
                     val savedState = controller.saveStateToMemory()
-                    suppressAudio = true
-                    try {
-                        controller.runFrame()
-                    } finally {
-                        suppressAudio = false
-                        controller.loadStateFromMemory(savedState)
+                    if (savedState.isEmpty()) {
+                        // No serialization support: continuing would leave the
+                        // core on speculative state, one frame ahead.
+                        runAhead = 0
+                    } else {
+                        suppressAudio = true
+                        try {
+                            controller.runFrame()
+                        } finally {
+                            suppressAudio = false
+                            if (!controller.loadStateFromMemory(savedState)) {
+                                // Rollback failed: the core stays on the
+                                // speculative frame, so run-ahead is off from
+                                // here on rather than silently drifting.
+                                runAhead = 0
+                            }
+                        }
                     }
                 } catch (_: Throwable) {}
             }
