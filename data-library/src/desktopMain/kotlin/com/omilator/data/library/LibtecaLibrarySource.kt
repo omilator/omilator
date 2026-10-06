@@ -203,6 +203,8 @@ class LibtecaLibrarySource(
         }
         val u = URL(baseUrl.trimEnd('/') + "/api/core/stream/$fileId")
         val conn = u.openConnection() as HttpURLConnection
+        conn.connectTimeout = CONNECT_TIMEOUT_MS
+        conn.readTimeout = READ_TIMEOUT_MS
         conn.setRequestProperty("Authorization", "Bearer $token")
         if (have > 0) conn.setRequestProperty("Range", "bytes=$have-")
         try {
@@ -280,6 +282,8 @@ class LibtecaLibrarySource(
         try {
             val u = URL(baseUrl.trimEnd('/') + "/api/core/progress/$editionId")
             val conn = u.openConnection() as HttpURLConnection
+            conn.connectTimeout = CONNECT_TIMEOUT_MS
+            conn.readTimeout = READ_TIMEOUT_MS
             conn.requestMethod = "POST"
             conn.doOutput = true
             conn.setRequestProperty("Authorization", "Bearer $token")
@@ -296,7 +300,18 @@ class LibtecaLibrarySource(
 
     private fun URL.openAuthed(): HttpURLConnection =
         (openConnection() as HttpURLConnection).apply {
+            // Unbounded by default: a stuck server hung the calling
+            // coroutine forever. Connect/read bounds are small enough to
+            // fail fast on a dead server; read applies per blocking read,
+            // not to whole bodies.
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
             requestMethod = "GET"
             setRequestProperty("Authorization", "Bearer $token")
         }
+
+    private companion object {
+        const val CONNECT_TIMEOUT_MS = 10_000
+        const val READ_TIMEOUT_MS = 30_000
+    }
 }

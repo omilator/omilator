@@ -37,4 +37,15 @@ object DesktopPaths {
             else -> ensure(File(System.getenv("XDG_DATA_HOME") ?: "$home/.local/share", "omilator"))
         }
     }
+
+    /** Where the installer puts cores and the player looks for them. One
+     *  property for both: installers used to derive it from configDir while
+     *  the resolver searched dataDir — identical on macOS/Windows, but on
+     *  Linux (XDG_CONFIG_HOME vs XDG_DATA_HOME) a fresh install wrote cores
+     *  where the player never looked. */
+    val coresDir: java.io.File by lazy {
+        java.io.File(dataDir, "cores").apply {
+            check(isDirectory || mkdirs()) { "Cannot create core directory: $absolutePath" }
+        }
+    }
 }

@@ -64,9 +64,23 @@ data class SettingsUiState(
 class SettingsViewModel(
     private val settingsStore: SettingsStore? = null,
     private val settingsPath: String = "",
+    /** Persisted snapshot used to seed the UI state. Loading must not be
+     *  expressed as user edits: the setters all schedule persistence, and a
+     *  default-valued ViewModel hydrated through them rewrote the persisted
+     *  fields they do not cover (libteca URL/token) with empty strings on
+     *  every cold start. */
+    initial: AppSettings = AppSettings.DEFAULT,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private val _state = MutableStateFlow(SettingsUiState())
+    private val _state = MutableStateFlow(
+        SettingsUiState(
+            theme = initial.theme,
+            libraryDirectories = initial.libraryDirectories,
+            theGamesDbApiKey = initial.theGamesDbApiKey,
+            libtecaServerUrl = initial.libtecaServerUrl,
+            libtecaServerToken = initial.libtecaServerToken,
+        ),
+    )
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
 
     fun setTheme(theme: AppTheme) {
@@ -145,6 +159,10 @@ fun SettingsScreen(
     onDownloadEmulators: () -> Unit = {},
     isDesktop: Boolean = false,
     onBack: () -> Unit = {},
+    /** Notified alongside the settings-side removal so the library drops
+     *  the directory from its live scan roots — without it the removed
+     *  root kept being scanned (and its games shown) until restart. */
+    onRemoveDirectory: (String) -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
 
@@ -255,7 +273,10 @@ fun SettingsScreen(
                                     modifier = Modifier.padding(vertical = 10.dp).weight(1f),
                                     color = MaterialTheme.colorScheme.onSurface,
                                 )
-                                IconButton(onClick = { viewModel.removeDirectory(dir) }) {
+                                IconButton(onClick = {
+                                    viewModel.removeDirectory(dir)
+                                    onRemoveDirectory(dir)
+                                }) {
                                     Icon(
                                         Icons.Rounded.Delete,
                                         contentDescription = "Remove",

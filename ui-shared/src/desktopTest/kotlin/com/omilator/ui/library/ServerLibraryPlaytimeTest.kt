@@ -21,13 +21,13 @@ class ServerLibraryPlaytimeTest {
     ) : ServerLibraryViewModel.ServerConnection {
         val reported = ConcurrentLinkedQueue<Int>()
 
-        override fun listGames(): List<ServerGame> = emptyList()
-        override fun downloadRom(game: ServerGame, onProgress: (Float) -> Unit): File? = null
-        override fun playtime(editionId: Long, seconds: Int) {
+        override suspend fun listGames(): List<ServerGame> = emptyList()
+        override suspend fun downloadRom(game: ServerGame, onProgress: (Float) -> Unit): File? = null
+        override suspend fun playtime(editionId: Long, seconds: Int) {
             reported.add(seconds)
         }
 
-        override fun playtimePosition(editionId: Long): Int? = storedPosition
+        override suspend fun playtimePosition(editionId: Long): Int? = storedPosition
     }
 
     private val game = ServerGame(

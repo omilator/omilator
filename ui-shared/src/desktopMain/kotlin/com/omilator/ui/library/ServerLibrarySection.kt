@@ -83,22 +83,25 @@ class ServerLibraryViewModel(
             }
     }
 
-    /** Abstraction over LibtecaLibrarySource so commonMain stays clean. */
+    /** Abstraction over LibtecaLibrarySource so commonMain stays clean.
+     *  Suspend functions: every operation performs bounded network IO and
+     *  stays cancellable by the caller's scope instead of spawning
+     *  detached threads that outlive the ViewModel. */
     interface ServerConnection {
-        fun listGames(): List<ServerGame>
-        fun downloadRom(game: ServerGame, onProgress: (Float) -> Unit): File?
-        fun playtime(editionId: Long, seconds: Int)
+        suspend fun listGames(): List<ServerGame>
+        suspend fun downloadRom(game: ServerGame, onProgress: (Float) -> Unit): File?
+        suspend fun playtime(editionId: Long, seconds: Int)
 
         /** Current playtime position (seconds played) for an edition, or
          *  null when the server has none recorded or the call fails. */
-        fun playtimePosition(editionId: Long): Int?
+        suspend fun playtimePosition(editionId: Long): Int?
 
         /** Reports a play session as the contract's cumulative position:
          *  the stored value is fetched and the session added onto it. Only
          *  POSTs when the prior value was actually obtained — a failed GET
          *  must not overwrite the server's real position with a bare
          *  session total. */
-        fun reportSession(editionId: Long, sessionSeconds: Int) {
+        suspend fun reportSession(editionId: Long, sessionSeconds: Int) {
             val existing = playtimePosition(editionId) ?: return
             // Long arithmetic: an Int-range existing plus the session must
             // saturate at the cap, not wrap negative. Capped just under the
@@ -123,22 +126,25 @@ class ServerLibraryViewModel(
         // games (or stale-credential errors) over a newer one's results.
         refreshJob?.cancel()
         val generation = ++refreshGeneration
-        _state.value = _state.value.copy(isLoading = true, error = null)
+        // update{} (CAS) rather than read-copy-write: a plain assignment
+        // here could clobber a download completion (or a user filter) that
+        // landed between reading _state.value and writing it back.
+        _state.update { it.copy(isLoading = true, error = null) }
         refreshJob = scope.launch(Dispatchers.IO) {
             try {
                 val conn = connect() ?: run {
                     if (generation == refreshGeneration) {
-                        _state.value = _state.value.copy(isLoading = false, error = "Not configured")
+                        _state.update { it.copy(isLoading = false, error = "Not configured") }
                     }
                     return@launch
                 }
                 val games = conn.listGames()
                 if (generation == refreshGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, games = games)
+                    _state.update { it.copy(isLoading = false, games = games) }
                 }
             } catch (e: Exception) {
                 if (generation == refreshGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, error = e.message ?: "Connection failed")
+                    _state.update { it.copy(isLoading = false, error = e.message ?: "Connection failed") }
                 }
             }
         }
@@ -150,20 +156,21 @@ class ServerLibraryViewModel(
     }
 
     fun setSearch(q: String) {
-        _state.value = _state.value.copy(searchQuery = q)
+        _state.update { it.copy(searchQuery = q) }
     }
 
     fun selectSystem(system: GameSystem?) {
-        _state.value = _state.value.copy(selectedSystem = system)
+        _state.update { it.copy(selectedSystem = system) }
     }
 
     fun download(game: ServerGame) {
         // In-flight or already downloaded: nothing to do. Derived from
         // state, so the old unsynchronized in-flight set is gone.
         if (_state.value.downloads[game.fileId] != null) return
-        _state.value = _state.value.copy(
-            downloads = _state.value.downloads + (game.fileId to DownloadState(progress = 0f)),
-        )
+        _state.update { s ->
+            if (s.downloads[game.fileId] != null) s
+            else s.copy(downloads = s.downloads + (game.fileId to DownloadState(progress = 0f)))
+        }
 
         scope.launch(Dispatchers.IO) {
             try {

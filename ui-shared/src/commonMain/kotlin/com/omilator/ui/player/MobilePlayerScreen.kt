@@ -126,12 +126,30 @@ fun MobilePlayerScreen(
     // Keyed to the session inputs: a changed ROM/core in the same
     // composition cancels the old loop instead of leaking it.
     LaunchedEffect(romPath, corePath) {
+        // True once the core's SRAM reflects this game's battery save (a
+        // restored one, or a fresh one when no save exists yet). The
+        // finally-block flush must be gated on it: after a failed loadGame
+        // (or a restore that silently did not take) the SRAM block holds
+        // fresh core RAM, and writing that would destroy the only durable
+        // battery save.
+        var sramAuthoritative = false
         withContext(Dispatchers.Default) {
             try {
                 coreController.loadCore(corePath)
                 val avInfo = coreController.loadGame(romPath)
-                sramStore?.read()?.let { saved ->
-                    if (saved.isNotEmpty()) runCatching { coreController.writeSaveRam(saved) }
+                val saved = sramStore?.read()
+                if (saved == null || saved.isEmpty()) {
+                    // No prior battery save: fresh core RAM is authoritative.
+                    sramAuthoritative = true
+                } else {
+                    runCatching { coreController.writeSaveRam(saved) }
+                    // writeSaveRam can silently no-op (size mismatch); only
+                    // a restore that verifiably took may be flushed back.
+                    sramAuthoritative = runCatching { coreController.readSaveRam() }
+                        .getOrNull()?.contentEquals(saved) == true
+                }
+                if (!sramAuthoritative && saved != null && saved.isNotEmpty()) {
+                    println("[Omilator] SRAM restore did not take; leaving existing battery save untouched")
                 }
                 frameW = avInfo.geometry.baseWidth.toInt()
                 frameH = avInfo.geometry.baseHeight.toInt()
@@ -175,7 +193,9 @@ fun MobilePlayerScreen(
                     // some cores hand the final battery block back.
                     runCatching {
                         sramStore?.let { store ->
-                            coreController.readSaveRam().takeIf { it.isNotEmpty() }?.let(store::write)
+                            if (sramAuthoritative) {
+                                coreController.readSaveRam().takeIf { it.isNotEmpty() }?.let(store::write)
+                            }
                         }
                     }
                     runCatching { coreController.detach() }

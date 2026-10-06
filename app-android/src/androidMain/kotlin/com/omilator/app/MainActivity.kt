@@ -106,18 +106,13 @@ class MainActivity : ComponentActivity() {
             // races loadSettingsAndScan() and drops configured directories.
             defaultScanDirectories = listOf(File(filesDir, "Documents").absolutePath),
         )
-        settingsViewModel = SettingsViewModel(settingsStore, settingsPath)
-
-        // Hydrate from disk BEFORE any settings action is reachable: the
-        // ViewModel starts from defaults, and its persist() copies those
-        // defaults wholesale - one tap on anything would atomically erase
-        // the persisted theme, directories and API key.
-        kotlinx.coroutines.runBlocking {
-            val settings = settingsStore.loadAppSettings(settingsPath)
-            settingsViewModel.setTheme(settings.theme)
-            settingsViewModel.setTheGamesDbApiKey(settings.theGamesDbApiKey)
-            settingsViewModel.setDirectories(settings.libraryDirectories)
+        // Seed from the persisted snapshot: hydrating through the
+        // persisting setters rewrote fields they do not cover (libteca
+        // URL/token) with empty strings on every cold start.
+        val initialSettings = kotlinx.coroutines.runBlocking {
+            settingsStore.loadAppSettings(settingsPath)
         }
+        settingsViewModel = SettingsViewModel(settingsStore, settingsPath, initial = initialSettings)
         coreDownloader = AndroidCoreDownloader(coresDir)
 
         // Pre-populate core counts so Settings reflects reality.
@@ -169,11 +164,18 @@ class MainActivity : ComponentActivity() {
                         downloadScope.launch(Dispatchers.IO) {
                             // SAF content:// URIs are not paths a core can
                             // fopen — materialize the ROM into the cache dir
-                            // and play that copy.
+                            // and play that copy. Tree document ids are
+                            // opaque (numeric ids, "msf:42", ...), so the
+                            // filename comes from SAF metadata, not the URI
+                            // tail: the tail has no extension, core
+                            // resolution failed, and scanned games could
+                            // not launch at all.
                             val playPath = if (path.startsWith("content://")) {
                                 runCatching {
-                                    val name = path.substringAfterLast('%').substringAfterLast('/')
-                                    val out = File(cacheDir, "rom-$name")
+                                    val displayName = queryDisplayName(Uri.parse(path))
+                                        ?: path.substringAfterLast('%').substringAfterLast('/')
+                                    val safe = displayName.replace(Regex("[^A-Za-z0-9._ -]"), "_")
+                                    val out = File(cacheDir, "rom-$safe")
                                     contentResolver.openInputStream(Uri.parse(path))?.use { input ->
                                         out.outputStream().use { input.copyTo(it) }
                                     } ?: return@launch
@@ -223,6 +225,17 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /** Display name for a SAF document from provider metadata — the real
+     *  filename including its extension, which opaque document ids do not
+     *  carry. Null when the provider cannot answer. */
+    private fun queryDisplayName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) return@runCatching null
+            val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0) cursor.getString(nameIndex) else null
+        }
+    }.getOrNull()
 
     /** Returns the bundled .so path if a core ships inside the APK's jniLibs. */
     private fun bundledCorePath(coreName: String): String? {

@@ -11,7 +11,20 @@ import java.util.zip.ZipInputStream
  */
 class CoreDownloader(private val targetDir: File) {
 
-    data class CoreEntry(val name: String, val system: String)
+    /**
+     * @param name canonical local core name — installs as `<name>.<ext>`,
+     *   which is what the launcher's core resolution looks for.
+     * @param artifact the buildbot's artifact stem when it deviates from
+     *   `name`: the osx buildbot publishes beetle_psx_hw as
+     *   `mednafen_psx_hw` (same mapping the Android downloader already
+     *   carries); without it the macOS entry 404s and first-run setup can
+     *   never complete, which also blocked .iso quick-play.
+     */
+    data class CoreEntry(
+        val name: String,
+        val system: String,
+        val artifact: String? = null,
+    )
 
     val cores: List<CoreEntry> = listOf(
         CoreEntry("mgba_libretro", "GB / GBC / GBA"),
@@ -19,7 +32,7 @@ class CoreDownloader(private val targetDir: File) {
         CoreEntry("snes9x_libretro", "SNES"),
         CoreEntry("genesis_plus_gx_libretro", "Genesis / Mega Drive"),
         CoreEntry("mupen64plus_next_libretro", "N64"),
-        CoreEntry("beetle_psx_hw_libretro", "PS1 (accurate)"),
+        CoreEntry("beetle_psx_hw_libretro", "PS1 (accurate)", artifact = "mednafen_psx_hw_libretro"),
         CoreEntry("pcsx_rearmed_libretro", "PS1 (fast)"),
         CoreEntry("melonds_libretro", "DS"),
         CoreEntry("azahar_libretro", "3DS"),
@@ -45,6 +58,24 @@ class CoreDownloader(private val targetDir: File) {
     }
 
     private val buildbotBase = "https://buildbot.libretro.com/nightly/${platform.buildbotPath}/latest"
+
+    /** Buildbot zip URL for an entry: normally `<name>.<ext>.zip`, but some
+     *  platforms publish a core under a different artifact stem (see
+     *  [CoreEntry.artifact]). Pure so tests can pin the mapping. */
+    internal fun zipUrlFor(entry: CoreEntry): String =
+        "$buildbotBase/${entry.artifact ?: entry.name}.${platform.coreExt}.zip"
+
+    /** Canonical on-disk library name — what isInstalled() and the
+     *  launcher's core resolution look for, regardless of what the
+     *  buildbot calls the artifact. */
+    internal fun installNameFor(entry: CoreEntry): String =
+        "${entry.name}.${platform.coreExt}"
+
+    /** The zip member that carries the core: archives name the member after
+     *  the zip's own stem, which deviates from the canonical name exactly
+     *  when [CoreEntry.artifact] does. */
+    internal fun archiveMemberFor(entry: CoreEntry): String =
+        "${entry.artifact ?: entry.name}.${platform.coreExt}"
 
     /** A core file that does not even carry the platform's dynamic-library
      *  magic is debris (partial historical write, HTML error page,
@@ -75,7 +106,7 @@ class CoreDownloader(private val targetDir: File) {
     /** Returns true if a core library already exists in targetDir. A
      *  zero-length file is a truncated install, not an installed core. */
     fun isInstalled(entry: CoreEntry): Boolean =
-        File(targetDir, "${entry.name}.${platform.coreExt}").let {
+        File(targetDir, installNameFor(entry)).let {
             it.exists() && it.length() > 0 && looksLikeNativeLibrary(it)
         }
 
@@ -87,14 +118,16 @@ class CoreDownloader(private val targetDir: File) {
      * Call from Dispatchers.IO. Calls [onProgress] with status text.
      */
     fun download(entry: CoreEntry, onProgress: (String) -> Unit = {}): Boolean {
-        val libName = "${entry.name}.${platform.coreExt}"
+        // Canonical install name — what isInstalled() and the launcher's
+        // core resolution look for.
+        val libName = installNameFor(entry)
         val finalFile = File(targetDir, libName)
         if (isInstalled(entry)) {
             onProgress("$libName already installed")
             return true
         }
 
-        val zipUrl = "$buildbotBase/${entry.name}.${platform.coreExt}.zip"
+        val zipUrl = zipUrlFor(entry)
         onProgress("Downloading $libName...")
         return try {
             targetDir.mkdirs()
@@ -106,10 +139,12 @@ class CoreDownloader(private val targetDir: File) {
                 conn.disconnect()
                 return false
             }
-            // Only the member carrying the exact expected library name
-            // counts — a helper library bundled in the archive must not be
-            // installed (and reported) as the requested core.
-            val expectedMember = libName
+            // Only the member carrying the archive's own stem counts (some
+            // buildbots publish a core under a different name than its
+            // libretro id — see CoreEntry.artifact), and a helper library
+            // bundled in the archive must not be installed (and reported)
+            // as the requested core.
+            val expectedMember = archiveMemberFor(entry)
             ZipInputStream(conn.inputStream).use { zis ->
                 var entry2 = zis.nextEntry
                 while (entry2 != null) {

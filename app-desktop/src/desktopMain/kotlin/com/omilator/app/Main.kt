@@ -17,6 +17,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,9 +40,10 @@ import androidx.compose.ui.window.rememberWindowState
 import com.omilator.data.launcher.EmulatorInstaller
 import com.omilator.data.launcher.StandaloneRegistry
 import com.omilator.data.library.CoreDownloader
+import com.omilator.data.library.GameSystem
 import com.omilator.data.library.JvmLibraryScanner
 import com.omilator.data.library.LibraryRepository
-import com.omilator.data.settings.AppSettings
+import com.omilator.data.settings.DesktopPaths
 import com.omilator.data.settings.SettingsStore
 import com.omilator.data.settings.defaultConfigDir
 import com.omilator.ui.OmilatorApp
@@ -54,7 +56,6 @@ import com.omilator.data.library.LibtecaLibrarySource
 import com.omilator.ui.player.PlayerScreen
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.FileDialog
@@ -62,7 +63,24 @@ import java.awt.Frame
 import java.io.File
 import javax.swing.JFrame
 
-fun main() = application {
+fun main() {
+    // Bootstrap runs once, before any Compose code: constructing the store
+    // and loading settings inside the composition (and hydrating through
+    // the persisting setters) rewrote persisted libteca credentials with
+    // empty strings on every cold start — the setters copy all owned
+    // fields, including the two they never loaded — and re-ran on every
+    // recomposition of the startup block.
+    val configDir = defaultConfigDir()
+    val settingsPath = File(configDir, "settings.json").absolutePath
+    val settingsStore = SettingsStore(
+        readText = { path -> File(path).takeIf { it.exists() }?.readText() },
+        writeText = { path, content -> atomicWriteText(java.nio.file.Paths.get(path), content) },
+    )
+    val initialSettings = kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+        settingsStore.loadAppSettings(settingsPath)
+    }
+
+    application {
     val windowState = rememberWindowState(
         size = DpSize(1200.dp, 760.dp),
         position = WindowPosition(Alignment.Center),
@@ -79,19 +97,15 @@ fun main() = application {
         val serverGame: ServerGame? = null,
         val reportPlaytime: ((ServerGame, Int) -> Unit)? = null,
         val startedAtNanos: Long = System.nanoTime(),
+        /** Known platform when the filename cannot say: server downloads
+         *  are extensionless .rom cache files, so the system travels with
+         *  the session instead of being re-derived from the extension. */
+        val systemOverride: GameSystem? = null,
     )
 
     var playing by remember { mutableStateOf<PlayingSession?>(null) }
 
-    val configDir = remember { defaultConfigDir() }
-    val settingsPath = remember { File(configDir, "settings.json").absolutePath }
-    val settingsStore = remember {
-        SettingsStore(
-            readText = { path -> File(path).takeIf { it.exists() }?.readText() },
-            writeText = { path, content -> atomicWriteText(java.nio.file.Paths.get(path), content) },
-        )
-    }
-    val coresDir = remember { File(configDir, "cores") }
+    val coresDir = remember { DesktopPaths.coresDir }
     val libraryViewModel = remember {
         LibraryViewModel(
             repository = LibraryRepository(JvmLibraryScanner()),
@@ -99,7 +113,9 @@ fun main() = application {
             settingsPath = settingsPath,
         )
     }
-    val settingsViewModel = remember { SettingsViewModel(settingsStore, settingsPath) }
+    val settingsViewModel = remember {
+        SettingsViewModel(settingsStore, settingsPath, initial = initialSettings)
+    }
 
     // Libteca server library (PLAN-GAMES G4): the Server page appears as the
     // last tab in the library pager when a server is configured in Settings.
@@ -134,98 +150,128 @@ fun main() = application {
             playing = null
         }
     }
+
+    // Session reporting runs on this application-lifetime scope: it must
+    // outlive the server page (and its ViewModel) that started the session,
+    // and reporting must not leak a detached thread per session.
+    val sessionReportScope = rememberCoroutineScope()
+    var launchError by remember { mutableStateOf<String?>(null) }
+
     val serverPage: (@Composable () -> Unit)? = if (serverConfigured) {
         {
             ServerLibrarySection(
                 viewModel = serverViewModel,
                 onPlayGame = { file, game ->
-                    playRom(file.absolutePath) { romPath ->
-                        val url = settingsViewModel.state.value.libtecaServerUrl.trim()
-                        val tok = settingsViewModel.state.value.libtecaServerToken.trim()
-                        val reporter: ((ServerGame, Int) -> Unit)? =
-                            if (url.isEmpty() || tok.isEmpty()) null
-                            else {
-                                val conn = LibtecaServerConnection(url, tok, File(configDir, "rom-cache"))
-                                val report: (ServerGame, Int) -> Unit =
-                                    { g, secs -> conn.reportSession(g.editionId, secs) }
-                                report
-                            }
-                        playing = PlayingSession(romPath, game, reporter)
+                    // The download cache is extensionless (.rom): the
+                    // platform is only known from server metadata. Refuse
+                    // to guess a core from the filename.
+                    val system = game.system
+                    if (system == null) {
+                        launchError = "Unsupported server platform: ${game.platformTag}"
+                    } else {
+                        playRom(file.absolutePath, system) { romPath ->
+                            val url = settingsViewModel.state.value.libtecaServerUrl.trim()
+                            val tok = settingsViewModel.state.value.libtecaServerToken.trim()
+                            val reporter: ((ServerGame, Int) -> Unit)? =
+                                if (url.isEmpty() || tok.isEmpty()) null
+                                else {
+                                    val conn = LibtecaServerConnection(url, tok, File(configDir, "rom-cache"))
+                                    val report: (ServerGame, Int) -> Unit = { g, secs ->
+                                        sessionReportScope.launch {
+                                            try {
+                                                conn.reportSession(g.editionId, secs)
+                                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                                throw e
+                                            } catch (_: Exception) {
+                                                System.err.println("[Omilator] Session report failed")
+                                            }
+                                        }
+                                    }
+                                    report
+                                }
+                            playing = PlayingSession(romPath, game, reporter, systemOverride = system)
+                        }
                     }
                 },
             )
         }
     } else null
 
-    // Load persisted settings on startup
-    kotlinx.coroutines.runBlocking {
-        val settings = settingsStore.loadAppSettings(settingsPath)
-        settingsViewModel.setTheme(settings.theme)
-        settingsViewModel.setTheGamesDbApiKey(settings.theGamesDbApiKey)
-        settingsViewModel.setDirectories(settings.libraryDirectories)
-    }
-
     // ---- First-run auto-setup: download missing cores + emulators ----
     var setupNeeded by remember { mutableStateOf(false) }
     var setupStatus by remember { mutableStateOf("") }
     var setupProgress by remember { mutableStateOf(0f) }
     var setupRunId by remember { mutableStateOf(0) }
+    var setupInProgress by remember { mutableStateOf(false) }
 
-    // Check on startup what's missing
     val coreDownloader = remember { CoreDownloader(coresDir) }
     val emulatorInstaller = remember { EmulatorInstaller() }
-    val coresMissing = coreDownloader.cores.size - coreDownloader.installedCount()
-    val emulatorsMissing = emulatorInstaller.emulators.size - emulatorInstaller.installedCount()
 
-    if (coresMissing > 0 || emulatorsMissing > 0) {
-        setupNeeded = true
-    }
-
-    // Run the auto-download. Keyed on setupRunId so Retry (or any later
+    // First-run auto-download, keyed on setupRunId so Retry (or any later
     // re-run) restarts it; a failed attempt must not leave the loop having
-    // only counted steps.
+    // only counted steps. The missing-components check lives INSIDE the
+    // effect: a plain `if` in the composition body re-evaluated on every
+    // recomposition, so clicking Skip was undone the next time any observed
+    // state changed and the dialog came back. setupInProgress serializes
+    // writers — coroutine cancellation cannot interrupt a blocking HTTP
+    // download, so a Retry during a running install would otherwise start a
+    // second concurrent one.
     LaunchedEffect(setupRunId) {
-        if (!setupNeeded) return@LaunchedEffect
-        withContext(Dispatchers.IO) {
-            setupProgress = 0f
-            val totalSteps = coresMissing + emulatorsMissing
-            var done = 0
+        if (!setupNeeded) {
+            val coresMissing = coreDownloader.cores.size - coreDownloader.installedCount()
+            val emulatorsMissing = emulatorInstaller.emulators.size - emulatorInstaller.installedCount()
+            if (coresMissing > 0 || emulatorsMissing > 0) {
+                setupNeeded = true
+            }
+        }
+        if (!setupNeeded || setupInProgress) return@LaunchedEffect
+        setupInProgress = true
+        try {
+            withContext(Dispatchers.IO) {
+                setupProgress = 0f
+                val coresMissing = coreDownloader.cores.count { !coreDownloader.isInstalled(it) }
+                val emulatorsMissing = emulatorInstaller.emulators.count { !emulatorInstaller.isInstalled(it) }
+                val totalSteps = coresMissing + emulatorsMissing
+                var done = 0
 
-            // Cores first
-            for (entry in coreDownloader.cores) {
-                if (!coreDownloader.isInstalled(entry)) {
-                    setupStatus = "Downloading ${entry.name} (${entry.system})..."
-                    coreDownloader.download(entry) { }
-                    done++
-                    setupProgress = done.toFloat() / totalSteps
+                // Cores first
+                for (entry in coreDownloader.cores) {
+                    if (!coreDownloader.isInstalled(entry)) {
+                        setupStatus = "Downloading ${entry.name} (${entry.system})..."
+                        coreDownloader.download(entry) { }
+                        done++
+                        setupProgress = done.toFloat() / totalSteps
+                    }
                 }
-            }
 
-            // Then emulators
-            for (spec in emulatorInstaller.emulators) {
-                if (!emulatorInstaller.isInstalled(spec)) {
-                    setupStatus = "Downloading ${spec.displayName}..."
-                    emulatorInstaller.install(spec) { msg -> setupStatus = msg }
-                    done++
-                    setupProgress = done.toFloat() / totalSteps
+                // Then emulators
+                for (spec in emulatorInstaller.emulators) {
+                    if (!emulatorInstaller.isInstalled(spec)) {
+                        setupStatus = "Downloading ${spec.displayName}..."
+                        emulatorInstaller.install(spec) { msg -> setupStatus = msg }
+                        done++
+                        setupProgress = done.toFloat() / totalSteps
+                    }
                 }
-            }
 
-            // Recompute reality instead of trusting the loop's completion:
-            // a network failure leaves components missing, and declaring
-            // success would dismiss setup while they stay absent.
-            val stillMissingCores = coreDownloader.cores.count { !coreDownloader.isInstalled(it) }
-            val stillMissingEmulators = emulatorInstaller.emulators.count { !emulatorInstaller.isInstalled(it) }
-            if (stillMissingCores + stillMissingEmulators == 0) {
-                setupStatus = "Setup complete"
-                setupNeeded = false
-            } else {
-                setupProgress = 1f
-                setupStatus = "Setup incomplete: $stillMissingCores core(s) and " +
-                    "$stillMissingEmulators emulator(s) could not be installed"
+                // Recompute reality instead of trusting the loop's completion:
+                // a network failure leaves components missing, and declaring
+                // success would dismiss setup while they stay absent.
+                val stillMissingCores = coreDownloader.cores.count { !coreDownloader.isInstalled(it) }
+                val stillMissingEmulators = emulatorInstaller.emulators.count { !emulatorInstaller.isInstalled(it) }
+                if (stillMissingCores + stillMissingEmulators == 0) {
+                    setupStatus = "Setup complete"
+                    setupNeeded = false
+                } else {
+                    setupProgress = 1f
+                    setupStatus = "Setup incomplete: $stillMissingCores core(s) and " +
+                        "$stillMissingEmulators emulator(s) could not be installed"
+                }
+                settingsViewModel.setCoresStatus(coreDownloader.installedCount(), coreDownloader.cores.size)
+                settingsViewModel.setEmulatorsStatus(emulatorInstaller.installedCount(), emulatorInstaller.emulators.size)
             }
-            settingsViewModel.setCoresStatus(coreDownloader.installedCount(), coreDownloader.cores.size)
-            settingsViewModel.setEmulatorsStatus(emulatorInstaller.installedCount(), emulatorInstaller.emulators.size)
+        } finally {
+            setupInProgress = false
         }
     }
 
@@ -258,10 +304,17 @@ fun main() = application {
                             } else false
                         },
                 ) {
-                    PlayerScreen(
-                        gameId = session.romPath,
-                        onClose = stopPlaying,
-                    )
+                    // Key the player to the session identity: remembered
+                    // engine/audio inside PlayerScreen are keyed by ROM path
+                    // alone, so replacing a session in the same composition
+                    // could reuse a released AudioOutput for a new engine.
+                    key(session) {
+                        PlayerScreen(
+                            gameId = session.romPath,
+                            onClose = stopPlaying,
+                            systemOverride = session.systemOverride,
+                        )
+                    }
                 }
             }
         } else {
@@ -335,7 +388,10 @@ fun main() = application {
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = { setupRunId++ }) {
+                        TextButton(
+                            onClick = { setupRunId++ },
+                            enabled = !setupInProgress,
+                        ) {
                             Text("Retry")
                         }
                     },
@@ -347,6 +403,21 @@ fun main() = application {
                 )
             }
         }
+
+        // Server games with an unrecognized platform tag cannot launch (the
+        // .rom cache carries no extension to guess from) — surface it
+        // instead of silently picking a core.
+        launchError?.let { message ->
+            AlertDialog(
+                onDismissRequest = { launchError = null },
+                title = { Text("Cannot launch game") },
+                text = { Text(message) },
+                confirmButton = {
+                    TextButton(onClick = { launchError = null }) { Text("OK") }
+                },
+            )
+        }
+    }
     }
 }
 
@@ -372,7 +443,11 @@ private fun atomicWriteText(target: java.nio.file.Path, content: String) {
     }
 }
 
-private fun playRom(romPath: String, useLibretro: (String) -> Unit) {
+private fun playRom(
+    romPath: String,
+    systemOverride: GameSystem? = null,
+    useLibretro: (String) -> Unit,
+) {
     // The standalone-emulator fallback is a macOS .app launcher; on other
     // desktops the blocklist below only prevented the libretro path before
     // routing into a launcher that cannot work there.
@@ -380,11 +455,21 @@ private fun playRom(romPath: String, useLibretro: (String) -> Unit) {
         useLibretro(romPath)
         return
     }
-    val ext = File(romPath).extension.lowercase()
-    val blockedSystemId = when (ext) {
-        "iso", "cso", "prx" -> "psp"
-        "wbfs", "gcz", "wad", "gcm" -> "gamecube_wii"
-        else -> null
+    // Server downloads are extensionless .rom cache files: route them by
+    // their known platform instead of the filename, or an explicit server
+    // PSP/GameCube/Wii game would slip past the standalone safety route.
+    val blockedSystemId = if (systemOverride != null) {
+        when (systemOverride) {
+            GameSystem.PSP -> "psp"
+            GameSystem.GAMECUBE, GameSystem.WII -> "gamecube_wii"
+            else -> null
+        }
+    } else {
+        when (File(romPath).extension.lowercase()) {
+            "iso", "cso", "prx" -> "psp"
+            "wbfs", "gcz", "wad", "gcm" -> "gamecube_wii"
+            else -> null
+        }
     }
     if (blockedSystemId == null) {
         // Not a HW-render-blocked system — use libretro
@@ -394,7 +479,7 @@ private fun playRom(romPath: String, useLibretro: (String) -> Unit) {
     val registry = StandaloneRegistry()
     val standalone = registry.forSystem(blockedSystemId)
     if (standalone != null) {
-        println("[Omilator] Routing $ext to ${standalone.displayName} (standalone)")
+        println("[Omilator] Routing $blockedSystemId to ${standalone.displayName} (standalone)")
         standalone.launch(romPath)
     } else {
         // HW-render-blocked system with no standalone installed.

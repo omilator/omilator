@@ -87,15 +87,44 @@ class PlayerEngine(
         }
     }
 
+    /** True once the core's SRAM block actually represents this game's
+     *  battery save (a restored one, or a fresh one when no save file
+     *  exists yet). Teardown may only flush SRAM to disk while this holds:
+     *  a failed startup (loadGame threw) or a restore that never took
+     *  effect leaves fresh core RAM in the slot, and flushing that would
+     *  write zeros over the player's only durable battery save. */
+    private var sramAuthoritative = false
+
     /** Battery saves live in the core's SRAM block; without this round-trip
      *  every exit threw away everything since the last flush. */
     private fun restoreSram() {
         val f = sramFile()
-        if (!f.exists()) return
-        runCatching { controller.writeSaveRam(f.readBytes()) }
+        if (!f.exists()) {
+            // No battery save yet: the fresh core RAM is the authoritative
+            // copy and new progress must be flushable.
+            sramAuthoritative = true
+            return
+        }
+        runCatching {
+            val bytes = f.readBytes()
+            if (bytes.isEmpty()) {
+                // A zero-byte save carries nothing to lose.
+                sramAuthoritative = true
+                return
+            }
+            controller.writeSaveRam(bytes)
+            // writeSaveRam silently no-ops when the core's SRAM block size
+            // disagrees with the file; verify the restore actually took
+            // before teardown is allowed to flush over that file.
+            sramAuthoritative = bytes.contentEquals(controller.readSaveRam())
+        }
+        if (!sramAuthoritative) {
+            println("[Omilator] SRAM restore did not take; leaving existing battery save untouched")
+        }
     }
 
     private fun flushSram() {
+        if (!sramAuthoritative) return
         runCatching {
             val data = controller.readSaveRam()
             if (data.isEmpty()) return
@@ -245,12 +274,14 @@ class PlayerEngine(
         // behind schedule that never reached a suspension point.
         while (currentCoroutineContext().isActive) {
             currentCoroutineContext().ensureActive()
-            // Poll gamepad before each frame
+            // Poll gamepad before each frame. Gamepad writes go to the
+            // gamepad-owned mask only — the poller reports every button
+            // (false for neutral/absent pads), and routing that through
+            // press/release erased keyboard-held buttons before the core
+            // could read them.
             gamepadPoller.poll(
-                setButton = { btn, pressed ->
-                    if (pressed) inputState.press(btn) else inputState.release(btn)
-                },
-                setAnalog = { index, value -> inputState.setAnalog(index, value) },
+                setButton = inputState::setGamepadButton,
+                setAnalog = inputState::setAnalog,
             )
 
             controller.runFrame()
@@ -381,24 +412,6 @@ data class PlayerState(
     val fps: Float = 60f,
     val error: String? = null,
 )
-
-private class InputStateHolder {
-    private val buttons = IntArray(16)
-    private val analogs = IntArray(4)
-
-    fun press(button: Int) { if (button in buttons.indices) buttons[button] = 1 }
-    fun release(button: Int) { if (button in buttons.indices) buttons[button] = 0 }
-    fun get(button: Int): Int = buttons.getOrElse(button) { 0 }
-    fun setAnalog(index: Int, value: Int) {
-        if (index in analogs.indices) analogs[index] = value.coerceIn(-32768, 32767)
-    }
-    fun analog(index: Int): Int = analogs.getOrElse(index) { 0 }
-    /** Gamepad vanished: everything it held stays stuck until cleared. */
-    fun clearAll() {
-        buttons.fill(0)
-        analogs.fill(0)
-    }
-}
 
 private class InputSourceAdapter(private val holder: InputStateHolder) : InputSource {
     override fun poll(port: Int, device: InputDevice, index: Int, id: Int): Int {

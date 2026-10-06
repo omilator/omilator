@@ -5,6 +5,7 @@ gradle-app.setting
 !gradle/wrapper/gradle-wrapper.jar
 
 # Kotlin / Gradle build
+.kotlin/
 build/
 out/
 *.class

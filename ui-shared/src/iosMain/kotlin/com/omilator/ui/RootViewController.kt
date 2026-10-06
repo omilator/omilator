@@ -54,18 +54,17 @@ fun RootViewController(): UIViewController {
         // configured directories (same fix as Android's MainActivity).
         defaultScanDirectories = listOf(documentsDir),
     )
-    val settingsViewModel = SettingsViewModel(settingsStore, settingsPath).apply {
+    val settingsViewModel = SettingsViewModel(
+        settingsStore,
+        settingsPath,
+        // Seed from the persisted snapshot: hydrating through the
+        // persisting setters rewrote fields they do not cover (libteca
+        // URL/token) with empty strings on every cold start.
+        initial = kotlinx.coroutines.runBlocking { settingsStore.loadAppSettings(settingsPath) },
+    ).apply {
         // Pre-populate installed/total so the Settings UI reflects reality
         // before the user opens it.
         setCoresStatus(coreDownloader.installedCount(), coreDownloader.cores.size)
-    }
-
-    // Load persisted theme + API key + libraryDirectories.
-    kotlinx.coroutines.runBlocking {
-        val settings = settingsStore.loadAppSettings(settingsPath)
-        settingsViewModel.setTheme(settings.theme)
-        settingsViewModel.setTheGamesDbApiKey(settings.theGamesDbApiKey)
-        settingsViewModel.setDirectories(settings.libraryDirectories)
     }
 
     val rootScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

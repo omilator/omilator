@@ -339,3 +339,83 @@ with retry. Skipped: playtime lost-update race needs a libteca contract
 change (CAS revision or increment endpoint) - revisit if the contract
 grows it. macOS note: .iso quick-play errors until the known-open
 beetle_psx_hw osx download entry is fixed.
+
+## 2026-10-06 (pass 9) — GPT-6 Pro audit: 11 numbered findings + 2
+headline claims, all verified and fixed
+
+Register: untracked pass-9 report pinned to 272b76c, outside the repo
+(.audits). The register's generator script was truncated after N05's
+patch; N06-N11 were implemented from their priority-table summaries after
+re-verification against HEAD, and the two headline claims (core-arena
+serialization buffers, SRAM overwrite on failed startup) were verified
+directly in code. Fixed:
+
+- Settings hydration on all three platforms now seeds SettingsViewModel
+  from the persisted snapshot via a constructor `initial` parameter
+  (desktop bootstrap moved before `application`); the old
+  hydrate-through-persisting-setters startup block rewrote libteca
+  URL/token with empty strings on every cold start. Same bug and fix on
+  Android + iOS, not only desktop as the report scoped it.
+- serialize/unserialize/cheat_set buffers allocate from per-call confined
+  arenas instead of the core-lifetime arena (LibretroFfm): rewind
+  snapshots and run-ahead rollbacks no longer grow native memory forever,
+  invisible to the rewind byte budget. GET_VARIABLE's value segment stays
+  core-lifetime by design (pass 6 stability fix).
+- SRAM flush gated on "core SRAM is authoritative" (restore verified via
+  read-back; fresh RAM counts only when no save file exists): a failed
+  startup (loadGame threw) or a silently-no-op'd restore can no longer
+  write fresh core RAM over the existing battery save. Same gate added to
+  MobilePlayerScreen (Android/iOS), which had the identical finally-block
+  flush.
+- Keyboard input survives gamepad polling: per-source atomic masks merged
+  at read time (new InputStateHolder); the poller's every-frame
+  neutral/absent writes no longer release keyboard-held buttons, and pad
+  disconnect clears only pad state + axes. Also fixes the UI/core-thread
+  visibility of the old plain IntArray.
+- Server downloads keep their platform end-to-end: PlayingSession +
+  PlayerScreen + resolveCorePath take an explicit GameSystem override, so
+  extensionless .rom cache files resolve by server metadata; unknown
+  platform tags surface an error dialog; explicit server PSP/GC/Wii
+  metadata goes through the macOS standalone safety route (cache suffix
+  can no longer bypass it); player composition keyed to the session.
+- Linux core install/lookup consume one property (DesktopPaths.coresDir);
+  the installer wrote to the config tree while the player searched the
+  data tree. No migration added (standing no-migration decision).
+- GB/GBC resolvable after automated setup: explicit mGBA fallback for
+  GB/GBC only (SameBoy stays preferred across all roots first); pinned by
+  a catalog invariant test — every auto-provisioned system has a
+  compatible core stem in CoreDownloader.cores.
+- Known-open macOS beetle_psx_hw 404 FIXED: desktop CoreEntry gained the
+  optional `artifact` field, mapping to the osx buildbot's
+  mednafen_psx_hw name (same mapping Android already carries). Unblocks
+  first-run setup completion and .iso quick-play on macOS.
+- Android SAF launches materialize ROMs under the provider's
+  DISPLAY_NAME (sanitized): opaque tree document IDs carry no extension,
+  so scanned games showed in the library but failed core resolution.
+- Removing a library directory in Settings also drops the library's live
+  scan root (new onRemoveDirectory wiring through OmilatorApp — all
+  platforms).
+- First-run setup: the missing-components check moved inside the run
+  effect (Skip is no longer undone by the next recomposition) and a
+  setupInProgress guard serializes installs (Retry cannot overlap a
+  still-blocking download).
+- Desktop viewport: aspect mode honors the core's reported display aspect
+  ratio (SNES 4:3 instead of its 8:7 pixel ratio), stretch fills both
+  axes (the old maxOf-scale "stretch" cropped), integer mode unchanged;
+  pure computeViewport() + tests.
+- Libteca HTTP is bounded (connect/read timeouts on every connection,
+  including the ROM stream and progress POST) and the server connection
+  is suspend end-to-end — reporting runs on the app-lifetime
+  sessionReportScope instead of detached threads.
+- Server page state transitions are atomic (_state.update everywhere):
+  download completions and user search/filter edits can no longer erase
+  each other.
+
+Tests: ui-shared desktopTest 34 (7 classes), data-library desktopTest 19,
+core-libretro desktopTest 3 (real-core smoke incl. the 823 KB serialize
+round-trip through the new per-call arenas), data-settings/data-launcher/
+data-saves/core-audio/core-input/core-render desktopTest — all green;
+Android compileDebugKotlinAndroid and iOS compileKotlinIosSimulatorArm64
+green. Desktop entry restructured: `fun main()` loads settings once
+before `application {}`; coresDir now DesktopPaths.coresDir (macOS/Windows
+unchanged — dataDir == configDir there).

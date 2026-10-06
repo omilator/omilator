@@ -44,8 +44,14 @@ import java.io.File
 fun PlayerScreen(
     gameId: String,
     onClose: () -> Unit,
+    /** Explicit system for this ROM when the filename alone cannot say —
+     *  downloaded server ROMs are extensionless `.rom` cache files, so the
+     *  platform must come from server metadata carried by the caller. */
+    systemOverride: com.omilator.data.library.GameSystem? = null,
 ) {
-    val corePath = remember(gameId) { resolveCorePath(gameId) }
+    val corePath = remember(gameId, systemOverride) {
+        resolveCorePath(gameId, systemOverride)
+    }
     if (corePath == null) {
         NoCoreMappingScreen(romPath = gameId, onClose = onClose)
         return
@@ -322,25 +328,23 @@ private fun NoCoreMappingScreen(romPath: String, onClose: () -> Unit) {
 @Composable
 private fun EmulatedSurface(bitmap: ImageBitmap, aspectRatio: Float, scaleMode: Int = 0) {
     Canvas(modifier = Modifier.fillMaxSize()) {
-        val canvasW = size.width
-        val canvasH = size.height
-        val scaleX = canvasW / bitmap.width
-        val scaleY = canvasH / bitmap.height
-        val scale = when (scaleMode) {
-            1 -> maxOf(scaleX, scaleY)     // stretch (fill screen)
-            2 -> minOf(scaleX, scaleY).toInt().toFloat().coerceAtLeast(1f) // integer
-            else -> minOf(scaleX, scaleY)  // aspect (default)
-        }
-        val drawW = bitmap.width * scale
-        val drawH = bitmap.height * scale
-        val dx = (canvasW - drawW) / 2f
-        val dy = (canvasH - drawH) / 2f
+        // Destination comes from the core's display aspect ratio (see
+        // computeViewport): scaling by bitmap pixels alone ignored it, and
+        // the old "stretch" mode used maxOf(scaleX, scaleY), which crops.
+        val dst = computeViewport(
+            canvasWidth = size.width,
+            canvasHeight = size.height,
+            bitmapWidth = bitmap.width,
+            bitmapHeight = bitmap.height,
+            displayAspectRatio = aspectRatio,
+            scaleMode = scaleMode,
+        )
         drawImage(
             image = bitmap,
             srcOffset = IntOffset.Zero,
             srcSize = IntSize(bitmap.width, bitmap.height),
-            dstOffset = IntOffset(dx.toInt(), dy.toInt()),
-            dstSize = IntSize(drawW.toInt(), drawH.toInt()),
+            dstOffset = IntOffset(dst.offset.x.toInt(), dst.offset.y.toInt()),
+            dstSize = IntSize(dst.size.width.toInt(), dst.size.height.toInt()),
         )
     }
 }
@@ -398,22 +402,4 @@ private fun DebugOverlay(
             style = MaterialTheme.typography.bodySmall,
         )
     }
-}
-
-private fun resolveCorePath(romPath: String): String? {
-    // Same resolver as every scanner: a private extension table here could
-    // (and did) diverge from GameSystem detection and silently launched
-    // unknown extensions on mGBA.
-    val system = com.omilator.data.library.GameSystem.detectByExtension(File(romPath).extension)
-        ?: return null
-    val coreName = "${system.preferredCore}_libretro"
-    val candidates = buildList {
-        val exts = listOf("dylib", "so", "dll")
-        exts.forEach { add(File("cores/$coreName.$it")) }
-        exts.forEach { add(File("../cores/$coreName.$it")) }
-        val installed = File(com.omilator.data.settings.DesktopPaths.dataDir, "cores")
-        exts.forEach { add(File(installed, "$coreName.$it")) }
-    }
-    return candidates.firstOrNull { it.exists() }?.absolutePath
-        ?: File("cores/$coreName.dylib").absolutePath
 }

@@ -87,6 +87,7 @@ fun OmilatorApp(
                     onDownloadEmulators = onDownloadEmulators,
                     isDesktop = isDesktop,
                     onBack = { destination = OmilatorDestination.LIBRARY },
+                    onRemoveDirectory = { libraryViewModel.removeDirectory(it) },
                 )
             }
         } else if (isExpanded) {
@@ -122,6 +123,7 @@ fun OmilatorApp(
                         onDownloadCores = onDownloadCores,
                             onDownloadEmulators = onDownloadEmulators,
                             isDesktop = isDesktop,
+                            onRemoveDirectory = { libraryViewModel.removeDirectory(it) },
                     )
                 }
             }
@@ -162,6 +164,7 @@ fun OmilatorApp(
                             onDownloadCores = onDownloadCores,
                             onDownloadEmulators = onDownloadEmulators,
                             isDesktop = isDesktop,
+                            onRemoveDirectory = { libraryViewModel.removeDirectory(it) },
                         )
                     }
                 }

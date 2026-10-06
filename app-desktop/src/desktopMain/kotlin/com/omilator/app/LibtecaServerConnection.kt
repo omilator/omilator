@@ -3,12 +3,19 @@ package com.omilator.app
 import com.omilator.data.library.LibtecaLibrarySource
 import com.omilator.ui.library.ServerGame
 import com.omilator.ui.library.ServerLibraryViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
  * Bridges LibtecaLibrarySource (the raw API client) to the ViewModel's
  * ServerConnection interface (what the UI consumes). Translates server
  * works/editions into ServerGame models the card rendering understands.
+ *
+ * Suspend implementation: blocking calls are confined to Dispatchers.IO by
+ * the bridge itself, and reporting runs on the caller's scope (the desktop
+ * app uses an application-lifetime scope) instead of a detached thread per
+ * report that nothing could cancel or observe.
  */
 class LibtecaServerConnection(
     baseUrl: String,
@@ -18,7 +25,7 @@ class LibtecaServerConnection(
 
     private val source = LibtecaLibrarySource(baseUrl, token, cacheDir)
 
-    override fun listGames(): List<ServerGame> {
+    override suspend fun listGames(): List<ServerGame> = withContext(Dispatchers.IO) {
         val games = mutableListOf<ServerGame>()
         for (lib in source.gamesLibraries()) {
             for (page in 0 until 100) { // bounded: 100 pages × 200 = 20k games
@@ -55,46 +62,28 @@ class LibtecaServerConnection(
                 if (works.size < 200) break
             }
         }
-        return games
+        games
     }
 
-    override fun downloadRom(
+    override suspend fun downloadRom(
         game: ServerGame,
         onProgress: (Float) -> Unit,
     ): File? = try {
-        kotlinx.coroutines.runBlocking {
-            source.downloadRom(game.fileId, game.fileSizeBytes, game.sha256) { bytes, total ->
-                if (total > 0) onProgress(bytes.toFloat() / total)
-            }
+        source.downloadRom(game.fileId, game.fileSizeBytes, game.sha256) { bytes, total ->
+            if (total > 0) onProgress(bytes.toFloat() / total)
         }
     } catch (_: Exception) {
         null
     }
 
-    override fun playtime(editionId: Long, seconds: Int) {
-        Thread {
-            try {
-                kotlinx.coroutines.runBlocking {
-                    source.reportPlaytime(editionId, seconds)
-                }
-            } catch (_: Exception) {}
-        }.start()
+    override suspend fun playtime(editionId: Long, seconds: Int) {
+        withContext(Dispatchers.IO) {
+            runCatching { source.reportPlaytime(editionId, seconds) }
+        }
     }
 
-    override fun playtimePosition(editionId: Long): Int? = try {
-        source.playtimePosition(editionId)
-    } catch (_: Exception) {
-        null
-    }
-
-    /** Off the caller's thread (the UI thread when a play session ends):
-     *  the position GET is blocking, with no bound the HTTP stack will
-     *  honor by default. */
-    override fun reportSession(editionId: Long, sessionSeconds: Int) {
-        Thread {
-            try {
-                super.reportSession(editionId, sessionSeconds)
-            } catch (_: Exception) {}
-        }.start()
-    }
+    override suspend fun playtimePosition(editionId: Long): Int? =
+        withContext(Dispatchers.IO) {
+            runCatching { source.playtimePosition(editionId) }.getOrNull()
+        }
 }

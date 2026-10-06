@@ -240,26 +240,39 @@ internal class LibretroFfm(
     fun callSerialize(): ByteArray {
         val size = callSerializeSize()
         require(size > 0L) { "Core returned zero serialize size" }
-        val buf = arena.allocate(size)
-        val ok = serializeHandle!!.invoke(buf, size) as Boolean
-        check(ok) { "retro_serialize returned false" }
-        val bytes = ByteArray(size.toInt())
-        MemorySegment.copy(buf, ValueLayout.JAVA_BYTE, 0, bytes, 0, size.toInt())
-        return bytes
+        // Call-scoped arena: the libretro contract guarantees the serialize
+        // buffer is only valid for the duration of the call. Allocating it
+        // from the core-lifetime arena meant every rewind snapshot (and every
+        // run-ahead rollback) grew native memory forever, invisible to the
+        // Kotlin-side rewind budget.
+        Arena.ofConfined().use { scratch ->
+            val buf = scratch.allocate(size)
+            val ok = serializeHandle!!.invoke(buf, size) as Boolean
+            check(ok) { "retro_serialize returned false" }
+            val bytes = ByteArray(size.toInt())
+            MemorySegment.copy(buf, ValueLayout.JAVA_BYTE, 0, bytes, 0, size.toInt())
+            return bytes
+        }
     }
 
     fun callUnserialize(bytes: ByteArray): Boolean {
         val size = bytes.size.toLong()
-        val buf = arena.allocate(size)
-        MemorySegment.copy(bytes, 0, buf, ValueLayout.JAVA_BYTE, 0, bytes.size)
-        return unserializeHandle!!.invoke(buf, size) as Boolean
+        Arena.ofConfined().use { scratch ->
+            val buf = scratch.allocate(size)
+            MemorySegment.copy(bytes, 0, buf, ValueLayout.JAVA_BYTE, 0, bytes.size)
+            return unserializeHandle!!.invoke(buf, size) as Boolean
+        }
     }
 
     fun callCheatReset() { cheatResetHandle?.invoke() }
 
     fun callCheatSet(index: Int, enabled: Boolean, code: String) {
-        val codeSeg = arena.allocateUtf8String(code)
-        cheatSetHandle?.invoke(index, enabled, codeSeg)
+        // Same call-scoped rule as serialize: the code string is only
+        // guaranteed for the duration of retro_cheat_set.
+        Arena.ofConfined().use { scratch ->
+            val codeSeg = scratch.allocateUtf8String(code)
+            cheatSetHandle?.invoke(index, enabled, codeSeg)
+        }
     }
 
     fun callApiVersion(): Int = apiVersion!!.invoke() as Int
