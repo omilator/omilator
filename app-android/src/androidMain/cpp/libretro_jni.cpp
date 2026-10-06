@@ -544,9 +544,13 @@ Java_com_omilator_core_libretro_impl_JniCoreController_writeSaveRamNative(
     if (!data || size == 0) return;
     jsize len = env->GetArrayLength(bytesJ);
     if (len <= 0) return;
-    size_t n = static_cast<size_t>(len) < size ? static_cast<size_t>(len) : size;
-    env->GetByteArrayRegion(bytesJ, 0, static_cast<jsize>(n),
-                            static_cast<jbyte*>(data));
+    // All-or-nothing, matching desktop semantics: the old partial prefix
+    // copy (min(len, size) bytes) left the core running with a HALF-restored
+    // battery block on a size mismatch while the read-back gate still
+    // refused to flush — corrupt save view plus no persistence. No-op on
+    // mismatch instead; the Kotlin-side gate handles migration.
+    if (static_cast<size_t>(len) != size) return;
+    env->GetByteArrayRegion(bytesJ, 0, len, static_cast<jbyte*>(data));
 }
 
 JNIEXPORT jstring JNICALL

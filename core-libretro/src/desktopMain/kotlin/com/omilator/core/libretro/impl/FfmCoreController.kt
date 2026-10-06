@@ -54,6 +54,7 @@ internal class FfmCoreController(
                 onHwVideo = ::dispatchHwVideo
                 onAudioBatch = ::dispatchAudioBatch
                 onInputState = ::dispatchInputState
+                onSystemAvInfo = ::adoptSystemAvInfo
             }
         } catch (t: Throwable) {
             newArena.close()
@@ -132,6 +133,14 @@ internal class FfmCoreController(
         videoSink = video
         audioSink = audio
         inputSource = input
+    }
+
+    private var geometryListener: ((Geometry) -> Unit)? = null
+
+    /** SET_SYSTEM_AV_INFO: update the cached av info (the HW-render FBO is
+     *  sized from it) and forward the geometry to the frontend listener. */
+    override fun setGeometryListener(listener: ((Geometry) -> Unit)?) {
+        geometryListener = listener
     }
 
     override fun detach() {
@@ -226,6 +235,26 @@ internal class FfmCoreController(
     private fun dispatchInputState(port: Int, device: Int, index: Int, id: Int): Short {
         val source = inputSource ?: return 0
         return source.poll(port, device.toEnum(), index, id).toShort()
+    }
+
+    /** Mid-run SET_SYSTEM_AV_INFO: the cache feeds the HW-render FBO size,
+     *  and the listener lets the player's viewport follow mode changes. */
+    private fun adoptSystemAvInfo(av: FfmAvInfo) {
+        val info = AvInfo(
+            geometry = Geometry(
+                baseWidth = av.baseWidth.toUInt(),
+                baseHeight = av.baseHeight.toUInt(),
+                maxWidth = av.maxWidth.toUInt(),
+                maxHeight = av.maxHeight.toUInt(),
+                aspectRatio = av.aspectRatio,
+            ),
+            timing = Timing(
+                fps = av.fps.toFloat(),
+                sampleRate = av.sampleRate,
+            ),
+        )
+        avInfoCache = info
+        geometryListener?.invoke(info.geometry)
     }
 
     private fun Int.toEnum() = when (this) {

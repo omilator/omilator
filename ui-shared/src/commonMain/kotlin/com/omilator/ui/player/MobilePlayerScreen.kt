@@ -76,6 +76,30 @@ private const val DPAD_RIGHT = 7
 interface SramStore {
     fun read(): ByteArray?
     fun write(data: ByteArray)
+
+    /** Move the current save aside as a backup (never overwriting an
+     *  existing backup); called when the persisted save's size no longer
+     *  matches the core's SRAM block, so the old bytes survive while a new
+     *  save starts. Returns false when the platform cannot back up — the
+     *  caller then keeps the flush gate closed rather than clobber the
+     *  only durable copy. */
+    fun backupExisting(): Boolean = false
+}
+
+/**
+ * Joypad-only touch input source. The poll callback's parameters are
+ * (port, device, index, id): answering by id alone reported the digital
+ * B/Y touch buttons (ids 0/1) as analog stick positions whenever a core
+ * polled RETRO_DEVICE_ANALOG. Only joypad queries on port 0 carry real
+ * state; everything else is honestly neutral.
+ */
+internal class TouchInputSource(
+    private val bits: List<kotlinx.atomicfu.AtomicInt>,
+) : com.omilator.core.libretro.api.InputSource {
+    override fun poll(port: Int, device: com.omilator.core.libretro.api.InputDevice, index: Int, id: Int): Int =
+        if (port == 0 && device == com.omilator.core.libretro.api.InputDevice.JOYPAD && id in bits.indices) {
+            bits[id].value
+        } else 0
 }
 
 /**
@@ -111,6 +135,7 @@ fun MobilePlayerScreen(
     var argbPixels by remember { mutableStateOf<IntArray?>(null) }
     var frameW by remember { mutableStateOf(0) }
     var frameH by remember { mutableStateOf(0) }
+    var sramNotice by remember { mutableStateOf<String?>(null) }
 
     val buttonStates = remember { mutableStateMapOf<Int, Boolean>() }
 
@@ -138,18 +163,32 @@ fun MobilePlayerScreen(
                 coreController.loadCore(corePath)
                 val avInfo = coreController.loadGame(romPath)
                 val saved = sramStore?.read()
-                if (saved == null || saved.isEmpty()) {
-                    // No prior battery save: fresh core RAM is authoritative.
-                    sramAuthoritative = true
-                } else {
-                    runCatching { coreController.writeSaveRam(saved) }
-                    // writeSaveRam can silently no-op (size mismatch); only
-                    // a restore that verifiably took may be flushed back.
-                    sramAuthoritative = runCatching { coreController.readSaveRam() }
-                        .getOrNull()?.contentEquals(saved) == true
-                }
-                if (!sramAuthoritative && saved != null && saved.isNotEmpty()) {
-                    println("[Omilator] SRAM restore did not take; leaving existing battery save untouched")
+                val decision = runCatching {
+                    evaluateSramRestore(
+                        saved = saved,
+                        readSaveRam = coreController::readSaveRam,
+                        writeSaveRam = coreController::writeSaveRam,
+                    )
+                }.getOrNull()
+                when {
+                    decision == null ->
+                        sramNotice = "Battery save could not be read; progress will not be saved this session."
+                    decision.migrate -> {
+                        if (sramStore != null && sramStore.backupExisting()) {
+                            // Size mismatch: old bytes preserved under a backup
+                            // name, core RAM adopted as the start of a new save.
+                            sramAuthoritative = true
+                            sramNotice = decision.notice
+                        } else {
+                            // Could not back the old save up (or no store):
+                            // never flush fresh core RAM over it.
+                            sramNotice = "Battery save could not be backed up; progress will not be saved this session."
+                        }
+                    }
+                    else -> {
+                        sramAuthoritative = decision.authoritative
+                        sramNotice = decision.notice
+                    }
                 }
                 frameW = avInfo.geometry.baseWidth.toInt()
                 frameH = avInfo.geometry.baseHeight.toInt()
@@ -158,7 +197,7 @@ fun MobilePlayerScreen(
                 coreController.attach(
                     video = { fb -> latestFrame[0] = fb },
                     audio = { samples -> audioOutput.write(samples) },
-                    input = { _, _, _, id -> if (id in inputBits.indices) inputBits[id].value else 0 },
+                    input = TouchInputSource(inputBits),
                 )
                 isLoading = false
                 // Nanosecond deadlines: (1000/fps).toLong() truncated 60 Hz
@@ -261,6 +300,17 @@ fun MobilePlayerScreen(
                                     )
                                 }
                             }
+                        }
+                        // Battery-save condition (size-mismatch migration,
+                        // unrestorable save): surfaced instead of a
+                        // console-only print that saving is off this session.
+                        sramNotice?.let { notice ->
+                            Text(
+                                notice,
+                                color = Color(0xFFFFD166),
+                                fontSize = 11.sp,
+                                modifier = Modifier.align(Alignment.TopCenter).padding(4.dp),
+                            )
                         }
                     }
                     ControllerBar(buttonStates, press)

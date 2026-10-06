@@ -13,10 +13,17 @@ import java.net.URL
  * Downloads and installs standalone emulator apps from GitHub releases.
  * Installs to ~/Applications/ (no sudo required).
  *
- * Each emulator has a GitHub repo, an asset filter (to find the macOS
- * download), and an extraction method (unzip for .zip, 7z for .7z).
+ * macOS-only by construction: every spec selects a macOS asset, extraction
+ * shells out to unzip/7z, and the installed artifact is a .app bundle.
+ * Running this on Windows/Linux (as first-run setup used to) could never
+ * complete — the PPSSPP *mac* zip failed to extract (no unzip.exe), or a
+ * mac bundle landed in ~/Applications and never launched. On non-macOS
+ * [emulators] is empty and setup treats "0 applicable" as complete.
  */
-class EmulatorInstaller {
+class EmulatorInstaller(
+    /** Injectable so tests can pin the platform filtering. */
+    private val osName: String = System.getProperty("os.name"),
+) {
 
     data class EmulatorSpec(
         val systemId: String,
@@ -28,20 +35,25 @@ class EmulatorInstaller {
         val extractCommand: String,
     )
 
-    val emulators: List<EmulatorSpec> = listOf(
-        EmulatorSpec("psp", "PPSSPP", "hrydgard/ppsspp",
-            assetFilter = { it.contains("mac", true) && it.endsWith(".zip") },
-            extractCommand = "unzip",
-        ),
-        EmulatorSpec("xbox", "xemu", "mborgerson/xemu",
-            assetFilter = { it.contains("mac", true) && it.endsWith(".zip") && !it.contains("dbg") },
-            extractCommand = "unzip",
-        ),
-        EmulatorSpec("ps3", "RPCS3", "RPCS3/rpcs3-binaries-mac",
-            assetFilter = { it.endsWith(".7z") },
-            extractCommand = "7z",
-        ),
-    )
+    val emulators: List<EmulatorSpec> =
+        if (osName.contains("Mac", ignoreCase = true)) {
+            listOf(
+                EmulatorSpec("psp", "PPSSPP", "hrydgard/ppsspp",
+                    assetFilter = { it.contains("mac", true) && it.endsWith(".zip") },
+                    extractCommand = "unzip",
+                ),
+                EmulatorSpec("xbox", "xemu", "mborgerson/xemu",
+                    assetFilter = { it.contains("mac", true) && it.endsWith(".zip") && !it.contains("dbg") },
+                    extractCommand = "unzip",
+                ),
+                EmulatorSpec("ps3", "RPCS3", "RPCS3/rpcs3-binaries-mac",
+                    assetFilter = { it.endsWith(".7z") },
+                    extractCommand = "7z",
+                ),
+            )
+        } else {
+            emptyList()
+        }
 
     private val targetDir = File(System.getProperty("user.home"), "Applications")
 
@@ -125,31 +137,36 @@ class EmulatorInstaller {
     private fun findAssetUrl(apiUrl: String, spec: EmulatorSpec): String? {
         return try {
             val conn = URL(apiUrl).openConnection() as HttpURLConnection
-            conn.requestMethod = "GET"
-            conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
-            // GitHub's API requires a User-Agent; anonymous Java clients get 403.
-            conn.setRequestProperty("User-Agent", "omilator-installer")
-            conn.connectTimeout = 10000
-            conn.readTimeout = 10000
-            if (conn.responseCode != 200) {
-                println("[Omilator] GitHub API HTTP ${conn.responseCode} for $apiUrl")
-                return null
+            try {
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("Accept", "application/vnd.github.v3+json")
+                // GitHub's API requires a User-Agent; anonymous Java clients get 403.
+                conn.setRequestProperty("User-Agent", "omilator-installer")
+                conn.connectTimeout = 10000
+                conn.readTimeout = 10000
+                if (conn.responseCode != 200) {
+                    println("[Omilator] GitHub API HTTP ${conn.responseCode} for $apiUrl")
+                    return null
+                }
+                val body = conn.inputStream.bufferedReader().readText()
+                // Parse the release as JSON. Two independent regex scans (all
+                // "name" fields vs all "browser_download_url" fields) paired
+                // by index — "name" occurs outside asset objects too, so the
+                // pairing picked the wrong asset.
+                val assets = kotlinx.serialization.json.Json.parseToJsonElement(body)
+                    .jsonObject["assets"]?.jsonArray ?: return null
+                for (asset in assets) {
+                    val obj = asset.jsonObject
+                    val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: continue
+                    val url = obj["browser_download_url"]?.jsonPrimitive?.contentOrNull ?: continue
+                    if (spec.assetFilter(name)) return url
+                }
+                null
+            } finally {
+                // Early returns above used to leak the connection into the
+                // JVM keep-alive pool; the setup retry loop multiplies them.
+                conn.disconnect()
             }
-            val body = conn.inputStream.bufferedReader().readText()
-            conn.disconnect()
-            // Parse the release as JSON. Two independent regex scans (all
-            // "name" fields vs all "browser_download_url" fields) paired
-            // by index — "name" occurs outside asset objects too, so the
-            // pairing picked the wrong asset.
-            val assets = kotlinx.serialization.json.Json.parseToJsonElement(body)
-                .jsonObject["assets"]?.jsonArray ?: return null
-            for (asset in assets) {
-                val obj = asset.jsonObject
-                val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: continue
-                val url = obj["browser_download_url"]?.jsonPrimitive?.contentOrNull ?: continue
-                if (spec.assetFilter(name)) return url
-            }
-            null
         } catch (e: Exception) {
             null
         }
@@ -160,10 +177,13 @@ class EmulatorInstaller {
         conn.instanceFollowRedirects = true
         conn.connectTimeout = 15000
         conn.readTimeout = 60000
-        conn.inputStream.use { input ->
-            dest.outputStream().use { output -> input.copyTo(output) }
+        try {
+            conn.inputStream.use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+        } finally {
+            conn.disconnect()
         }
-        conn.disconnect()
     }
 
     private fun runCommand(vararg cmd: String): Boolean {

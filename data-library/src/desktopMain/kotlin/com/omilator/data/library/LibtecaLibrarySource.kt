@@ -104,10 +104,15 @@ class LibtecaLibrarySource(
     /** Games libraries on the server, in server order. */
     fun gamesLibraries(): List<Library> {
         val conn = URL(baseUrl.trimEnd('/') + "/api/core/libraries").openAuthed()
-        val body = conn.inputStream.use { it.readBytes() }
-        val code = conn.responseCode
-        conn.disconnect()
-        require(code == 200) { "libraries: HTTP $code" }
+        val body = try {
+            // Check the status BEFORE touching inputStream: getInputStream
+            // throws on non-2xx, which used to skip disconnect() entirely.
+            val code = conn.responseCode
+            require(code == 200) { "libraries: HTTP $code" }
+            conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
         return json.decodeFromString<List<Library>>(body.decodeToString()).filter { it.type == "games" }
     }
 
@@ -117,10 +122,13 @@ class LibtecaLibrarySource(
             baseUrl.trimEnd('/') + "/api/core/libraries/$libraryId/works?sort=title&limit=$limit&offset=$offset",
         )
         val conn = u.openAuthed()
-        val body = conn.inputStream.use { it.readBytes() }
-        val code = conn.responseCode
-        conn.disconnect()
-        require(code == 200) { "works: HTTP $code" }
+        val body = try {
+            val code = conn.responseCode
+            require(code == 200) { "works: HTTP $code" }
+            conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
         return json.decodeFromString<List<Work>>(body.decodeToString())
     }
 
@@ -128,10 +136,13 @@ class LibtecaLibrarySource(
     fun work(workId: Long): WorkDetail {
         val u = URL(baseUrl.trimEnd('/') + "/api/core/works/$workId")
         val conn = u.openAuthed()
-        val body = conn.inputStream.use { it.readBytes() }
-        val code = conn.responseCode
-        conn.disconnect()
-        require(code == 200) { "work: HTTP $code" }
+        val body = try {
+            val code = conn.responseCode
+            require(code == 200) { "work: HTTP $code" }
+            conn.inputStream.use { it.readBytes() }
+        } finally {
+            conn.disconnect()
+        }
         return json.decodeFromString<WorkDetail>(body.decodeToString())
     }
 
@@ -141,9 +152,11 @@ class LibtecaLibrarySource(
      */
     fun cover(coverPath: String): ByteArray? = try {
         val conn = URL(baseUrl.trimEnd('/') + "/api/core/covers/" + coverPath.trimStart('/')).openAuthed()
-        val body = if (conn.responseCode == 200) conn.inputStream.use { it.readBytes() } else null
-        conn.disconnect()
-        body
+        try {
+            if (conn.responseCode == 200) conn.inputStream.use { it.readBytes() } else null
+        } finally {
+            conn.disconnect()
+        }
     } catch (_: Exception) {
         null
     }
@@ -269,12 +282,15 @@ class LibtecaLibrarySource(
     fun playtimePosition(editionId: Long): Int? = try {
         val u = URL(baseUrl.trimEnd('/') + "/api/core/progress/$editionId")
         val conn = u.openAuthed()
-        val body = conn.inputStream.use { it.readBytes() }
-        val code = conn.responseCode
-        conn.disconnect()
-        if (code == 200) {
-            json.decodeFromString<ProgressPayload>(body.decodeToString()).position.toInt()
-        } else null
+        try {
+            val code = conn.responseCode
+            if (code == 200) {
+                val body = conn.inputStream.use { it.readBytes() }
+                json.decodeFromString<ProgressPayload>(body.decodeToString()).position.toInt()
+            } else null
+        } finally {
+            conn.disconnect()
+        }
     } catch (_: Exception) { null }
 
     /** Reports play seconds back as the contract's progress position. */
@@ -288,11 +304,13 @@ class LibtecaLibrarySource(
             conn.doOutput = true
             conn.setRequestProperty("Authorization", "Bearer $token")
             conn.setRequestProperty("Content-Type", "application/json")
-            val body = """{"position":$secondsPlayed,"percent":null}"""
-            conn.outputStream.use { it.write(body.toByteArray()) }
-            val ok = conn.responseCode == 200
-            conn.disconnect()
-            ok
+            try {
+                val body = """{"position":$secondsPlayed,"percent":null}"""
+                conn.outputStream.use { it.write(body.toByteArray()) }
+                conn.responseCode == 200
+            } finally {
+                conn.disconnect()
+            }
         } catch (_: Exception) {
             false
         }

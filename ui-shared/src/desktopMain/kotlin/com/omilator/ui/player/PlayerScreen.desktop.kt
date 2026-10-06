@@ -48,6 +48,12 @@ fun PlayerScreen(
      *  downloaded server ROMs are extensionless `.rom` cache files, so the
      *  platform must come from server metadata carried by the caller. */
     systemOverride: com.omilator.data.library.GameSystem? = null,
+    /** Notified with the session's engine so owners can stop it outside
+     *  the Compose lifecycle — the window-close handler must tear the core
+     *  down synchronously, because process exit never runs onDispose
+     *  (where engine.stop() normally lives). Null when this screen leaves
+     *  without ever creating one (no core mapping). */
+    onEngineReady: ((PlayerEngine?) -> Unit)? = null,
 ) {
     val corePath = remember(gameId, systemOverride) {
         resolveCorePath(gameId, systemOverride)
@@ -63,6 +69,10 @@ fun PlayerScreen(
             romPath = gameId,
             audioOutput = audioOutput,
         )
+    }
+    DisposableEffect(engine) {
+        onEngineReady?.invoke(engine)
+        onDispose { onEngineReady?.invoke(null) }
     }
     val state by engine.state.collectAsState()
     val focusRequester = remember { FocusRequester() }
@@ -212,6 +222,19 @@ fun PlayerScreen(
             framesEmitted = 0,
             modifier = Modifier.align(Alignment.TopStart),
         )
+
+        // Battery-save condition (size-mismatch migration, unreadable save):
+        // surfaced here instead of dying on the console.
+        state.sramNotice?.let { notice ->
+            Text(
+                notice,
+                color = Color(0xFFFFD166),
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(8.dp),
+            )
+        }
 
         // Cheat dialog
         if (showCheatDialog) {

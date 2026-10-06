@@ -293,4 +293,18 @@ private class MobileSramStore(
                 java.nio.file.StandardCopyOption.REPLACE_EXISTING)
         }
     }
+
+    /** See [SramStore.backupExisting]: called when the persisted save's
+     *  size no longer matches the core's SRAM block. Never overwrites an
+     *  existing backup. */
+    override fun backupExisting(): Boolean {
+        if (!file.exists()) return true
+        var target = File(dir, "${file.name}.bak")
+        var n = 2
+        while (target.exists()) {
+            target = File(dir, "${file.name}.bak$n")
+            n++
+        }
+        return file.renameTo(target)
+    }
 }

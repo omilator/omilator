@@ -43,6 +43,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class SettingsUiState(
@@ -84,48 +85,53 @@ class SettingsViewModel(
     val state: StateFlow<SettingsUiState> = _state.asStateFlow()
 
     fun setTheme(theme: AppTheme) {
-        _state.value = _state.value.copy(theme = theme)
+        _state.update { it.copy(theme = theme) }
         persist()
     }
 
     fun setDirectories(dirs: List<String>) {
-        _state.value = _state.value.copy(libraryDirectories = dirs)
+        _state.update { it.copy(libraryDirectories = dirs) }
         persist()
     }
 
     fun addDirectory(dir: String) {
-        val current = _state.value.libraryDirectories.toMutableList()
-        if (dir !in current) current += dir
-        setDirectories(current)
+        // update{} (CAS) end to end: read-copy-write here could drop a
+        // concurrent status write (see the class comment below).
+        _state.update { s ->
+            if (dir in s.libraryDirectories) s
+            else s.copy(libraryDirectories = s.libraryDirectories + dir)
+        }
+        persist()
     }
 
     fun removeDirectory(dir: String) {
-        setDirectories(_state.value.libraryDirectories - dir)
+        _state.update { s -> s.copy(libraryDirectories = s.libraryDirectories - dir) }
+        persist()
     }
 
     fun setCoresStatus(installed: Int, total: Int) {
-        _state.value = _state.value.copy(coresInstalled = installed, coresTotal = total)
+        _state.update { it.copy(coresInstalled = installed, coresTotal = total) }
     }
 
     fun setCoresDownloading(downloading: Boolean, status: String = "") {
-        _state.value = _state.value.copy(coresDownloading = downloading, coresStatus = status)
+        _state.update { it.copy(coresDownloading = downloading, coresStatus = status) }
     }
 
     fun setEmulatorsStatus(installed: Int, total: Int) {
-        _state.value = _state.value.copy(emulatorsInstalled = installed, emulatorsTotal = total)
+        _state.update { it.copy(emulatorsInstalled = installed, emulatorsTotal = total) }
     }
 
     fun setEmulatorsDownloading(downloading: Boolean, status: String = "") {
-        _state.value = _state.value.copy(emulatorsDownloading = downloading, emulatorsStatus = status)
+        _state.update { it.copy(emulatorsDownloading = downloading, emulatorsStatus = status) }
     }
 
     fun setTheGamesDbApiKey(key: String) {
-        _state.value = _state.value.copy(theGamesDbApiKey = key)
+        _state.update { it.copy(theGamesDbApiKey = key) }
         persist()
     }
 
     fun setLibtecaServer(url: String, token: String) {
-        _state.value = _state.value.copy(libtecaServerUrl = url, libtecaServerToken = token)
+        _state.update { it.copy(libtecaServerUrl = url, libtecaServerToken = token) }
         persist()
     }
 
@@ -133,11 +139,20 @@ class SettingsViewModel(
      * Persist the current theme + API key + libraryDirectories to the
      * SettingsStore. No-op if no store/path was provided (legacy callers).
      * A read-modify-write copy, so fields this screen does not own survive.
+     *
+     * All setters use `_state.update` (atomic CAS): first-run setup and
+     * core downloads stream status writes from IO workers while the UI
+     * thread edits settings — the read-copy-write form used before let
+     * whichever thread wrote last erase the other's field (a theme toggle
+     * reverted mid-download status text, a status write dropped a typed
+     * server URL). The snapshot for persistence is taken when the launched
+     * coroutine runs, not at call time, so it reflects every update that
+     * landed before the write.
      */
     private fun persist() {
         val store = settingsStore ?: return
-        val s = _state.value
         scope.launch {
+            val s = _state.value
             store.updateAppSettings(settingsPath) {
                 it.copy(
                     theme = s.theme,

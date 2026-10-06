@@ -15,6 +15,12 @@ interface CoreController {
     fun attach(video: VideoSink, audio: AudioSink, input: InputSource)
     fun detach()
 
+    /** Mid-run geometry changes (SET_SYSTEM_AV_INFO): a core that switches
+     *  display mode reports the new geometry here so the frontend's aspect
+     *  destination can follow it. Default no-op for controllers that do
+     *  not surface the command. */
+    fun setGeometryListener(listener: ((Geometry) -> Unit)?) {}
+
     fun saveState(path: String): Boolean
     fun loadState(path: String): Boolean
 

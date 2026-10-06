@@ -129,14 +129,13 @@ class CoreDownloader(private val targetDir: File) {
 
         val zipUrl = zipUrlFor(entry)
         onProgress("Downloading $libName...")
+        val conn = URL(zipUrl).openConnection() as HttpURLConnection
         return try {
             targetDir.mkdirs()
-            val conn = URL(zipUrl).openConnection() as HttpURLConnection
             conn.connectTimeout = 10000
             conn.readTimeout = 30000
             if (conn.responseCode != 200) {
                 onProgress("Failed: HTTP ${conn.responseCode}")
-                conn.disconnect()
                 return false
             }
             // Only the member carrying the archive's own stem counts (some
@@ -172,7 +171,6 @@ class CoreDownloader(private val targetDir: File) {
                                 )
                             }
                             onProgress("Installed $libName (${finalFile.length() / 1024}KB)")
-                            conn.disconnect()
                             return true
                         } finally {
                             tmp.delete()
@@ -181,11 +179,14 @@ class CoreDownloader(private val targetDir: File) {
                     entry2 = zis.nextEntry
                 }
             }
-            conn.disconnect()
             false
         } catch (e: Exception) {
             onProgress("Error: ${e.message}")
             false
+        } finally {
+            // Every early return and exception path used to skip this,
+            // leaking the socket until GC.
+            conn.disconnect()
         }
     }
 

@@ -47,7 +47,10 @@ internal fun computeViewport(
         }
 
         else -> {
-            val ar = if (displayAspectRatio > 0f && !displayAspectRatio.isNaN()) {
+            // > 0f already rejects NaN (all NaN comparisons are false);
+            // isFinite additionally rejects +Inf, which would produce
+            // infinite destination sizes.
+            val ar = if (displayAspectRatio > 0f && displayAspectRatio.isFinite()) {
                 displayAspectRatio
             } else {
                 bitmapWidth.toFloat() / bitmapHeight.toFloat()

@@ -45,6 +45,10 @@ internal class LibretroFfm(
     var onAudioBatch: ((MemorySegment, Long) -> Long)? = null
     var onInputState: ((Int, Int, Int, Int) -> Short)? = null
 
+    /** SET_SYSTEM_AV_INFO: the core switched display mode mid-run. Parsed
+     *  from the retro_system_av_info the core hands over. */
+    var onSystemAvInfo: ((AvInfo) -> Unit)? = null
+
     var pixelFormat: Int = PixelFormatC.ORGB1555
         private set
 
@@ -291,16 +295,18 @@ internal class LibretroFfm(
     fun callSystemAvInfo(): AvInfo {
         val seg = arena.allocate(systemAvInfo)
         getSystemAvInfo!!.invoke(seg)
-        return AvInfo(
-            baseWidth = systemAvInfo.varHandle(*ppath("geometry", "base_width")).get(seg) as Int,
-            baseHeight = systemAvInfo.varHandle(*ppath("geometry", "base_height")).get(seg) as Int,
-            maxWidth = systemAvInfo.varHandle(*ppath("geometry", "max_width")).get(seg) as Int,
-            maxHeight = systemAvInfo.varHandle(*ppath("geometry", "max_height")).get(seg) as Int,
-            aspectRatio = systemAvInfo.varHandle(*ppath("geometry", "aspect_ratio")).get(seg) as Float,
-            fps = systemAvInfo.varHandle(*ppath("timing", "fps")).get(seg) as Double,
-            sampleRate = systemAvInfo.varHandle(*ppath("timing", "sample_rate")).get(seg) as Double,
-        )
+        return readSystemAvInfo(seg)
     }
+
+    private fun readSystemAvInfo(seg: MemorySegment): AvInfo = AvInfo(
+        baseWidth = systemAvInfo.varHandle(*ppath("geometry", "base_width")).get(seg) as Int,
+        baseHeight = systemAvInfo.varHandle(*ppath("geometry", "base_height")).get(seg) as Int,
+        maxWidth = systemAvInfo.varHandle(*ppath("geometry", "max_width")).get(seg) as Int,
+        maxHeight = systemAvInfo.varHandle(*ppath("geometry", "max_height")).get(seg) as Int,
+        aspectRatio = systemAvInfo.varHandle(*ppath("geometry", "aspect_ratio")).get(seg) as Float,
+        fps = systemAvInfo.varHandle(*ppath("timing", "fps")).get(seg) as Double,
+        sampleRate = systemAvInfo.varHandle(*ppath("timing", "sample_rate")).get(seg) as Double,
+    )
 
     fun callLoadGame(romPath: String): Boolean {
         val pathSeg = arena.allocateUtf8String(romPath)
@@ -388,6 +394,19 @@ internal class LibretroFfm(
             RetroEnv.GET_PREFERRED_HW_RENDER -> false
             RetroEnv.SET_HW_RENDER -> hwRender.handleRequest(data)
 
+            // A mid-run display-mode change (N64 240p↔480i, PS1 interlace
+            // toggles, special SNES modes): parse the new av info and hand
+            // it to the frontend, which otherwise keeps sizing the viewport
+            // at the load-time aspect ratio.
+            RetroEnv.SET_SYSTEM_AV_INFO -> {
+                if (data.address() != 0L) {
+                    val info = readSystemAvInfo(data.reinterpret(systemAvInfo.byteSize()))
+                    onSystemAvInfo?.invoke(info)
+                }
+                // true is the contract's expectation for accepted changes.
+                true
+            }
+
             // ---- Core options ----
             RetroEnv.SET_INPUT_DESCRIPTORS -> {
                 parseInputDescriptors(data)
@@ -458,7 +477,6 @@ internal class LibretroFfm(
         RetroEnv.SET_FRAME_TIME_CALLBACK,
         RetroEnv.SET_AUDIO_CALLBACK,
         RetroEnv.GET_PERF_INTERFACE,
-        RetroEnv.SET_SYSTEM_AV_INFO,
         RetroEnv.SET_SUPPORT_NO_GAME,
     )
 

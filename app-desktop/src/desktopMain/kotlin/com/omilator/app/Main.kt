@@ -53,6 +53,7 @@ import com.omilator.ui.library.ServerGame
 import com.omilator.ui.library.ServerLibraryViewModel
 import com.omilator.ui.library.ServerLibrarySection
 import com.omilator.data.library.LibtecaLibrarySource
+import com.omilator.ui.player.PlayerEngine
 import com.omilator.ui.player.PlayerScreen
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
@@ -95,7 +96,7 @@ fun main() {
     data class PlayingSession(
         val romPath: String,
         val serverGame: ServerGame? = null,
-        val reportPlaytime: ((ServerGame, Int) -> Unit)? = null,
+        val reportPlaytime: ((ServerGame, Int, Boolean) -> Unit)? = null,
         val startedAtNanos: Long = System.nanoTime(),
         /** Known platform when the filename cannot say: server downloads
          *  are extensionless .rom cache files, so the system travels with
@@ -104,6 +105,13 @@ fun main() {
     )
 
     var playing by remember { mutableStateOf<PlayingSession?>(null) }
+
+    /** The active session's engine, registered by PlayerScreen. Window
+     *  close must stop it synchronously: exitProcess(0) never runs
+     *  Compose disposal, so without this the core's live battery RAM (all
+     *  in-game saves since launch) was dropped on the most common quit
+     *  path — the red traffic light, Cmd+W, Cmd+Q. */
+    val activeEngine = remember { mutableStateOf<PlayerEngine?>(null) }
 
     val coresDir = remember { DesktopPaths.coresDir }
     val libraryViewModel = remember {
@@ -138,17 +146,18 @@ fun main() {
     DisposableEffect(settingsState.libtecaServerUrl, settingsState.libtecaServerToken) {
         onDispose { serverViewModel.close() }
     }
-    val stopPlaying = {
+    val stopPlaying = { awaitReports: Boolean ->
         val session = playing
         if (session != null) {
             val seconds = ((System.nanoTime() - session.startedAtNanos) / 1_000_000_000L)
                 .coerceAtMost(Int.MAX_VALUE.toLong())
                 .toInt()
             session.serverGame?.let { game ->
-                session.reportPlaytime?.invoke(game, seconds)
+                session.reportPlaytime?.invoke(game, seconds, awaitReports)
             }
             playing = null
         }
+        Unit
     }
 
     // Session reporting runs on this application-lifetime scope: it must
@@ -169,15 +178,15 @@ fun main() {
                     if (system == null) {
                         launchError = "Unsupported server platform: ${game.platformTag}"
                     } else {
-                        playRom(file.absolutePath, system) { romPath ->
+                        playRom(file.absolutePath, system, { launchError = it }) { romPath ->
                             val url = settingsViewModel.state.value.libtecaServerUrl.trim()
                             val tok = settingsViewModel.state.value.libtecaServerToken.trim()
-                            val reporter: ((ServerGame, Int) -> Unit)? =
+                            val reporter: ((ServerGame, Int, Boolean) -> Unit)? =
                                 if (url.isEmpty() || tok.isEmpty()) null
                                 else {
                                     val conn = LibtecaServerConnection(url, tok, File(configDir, "rom-cache"))
-                                    val report: (ServerGame, Int) -> Unit = { g, secs ->
-                                        sessionReportScope.launch {
+                                    val report: (ServerGame, Int, Boolean) -> Unit = { g, secs, await ->
+                                        val send: suspend () -> Unit = {
                                             try {
                                                 conn.reportSession(g.editionId, secs)
                                             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -185,6 +194,15 @@ fun main() {
                                             } catch (_: Exception) {
                                                 System.err.println("[Omilator] Session report failed")
                                             }
+                                        }
+                                        if (await) {
+                                            // Window-close path: the process exits right
+                                            // after, so the report must complete before
+                                            // exitProcess(0) — an async launch would be
+                                            // discarded with the process.
+                                            kotlinx.coroutines.runBlocking { send() }
+                                        } else {
+                                            sessionReportScope.launch { send() }
                                         }
                                     }
                                     report
@@ -259,13 +277,13 @@ fun main() {
                 // success would dismiss setup while they stay absent.
                 val stillMissingCores = coreDownloader.cores.count { !coreDownloader.isInstalled(it) }
                 val stillMissingEmulators = emulatorInstaller.emulators.count { !emulatorInstaller.isInstalled(it) }
-                if (stillMissingCores + stillMissingEmulators == 0) {
+                val incomplete = setupIncompleteMessage(stillMissingCores, stillMissingEmulators)
+                if (incomplete == null) {
                     setupStatus = "Setup complete"
                     setupNeeded = false
                 } else {
                     setupProgress = 1f
-                    setupStatus = "Setup incomplete: $stillMissingCores core(s) and " +
-                        "$stillMissingEmulators emulator(s) could not be installed"
+                    setupStatus = incomplete
                 }
                 settingsViewModel.setCoresStatus(coreDownloader.installedCount(), coreDownloader.cores.size)
                 settingsViewModel.setEmulatorsStatus(emulatorInstaller.installedCount(), emulatorInstaller.emulators.size)
@@ -283,7 +301,21 @@ fun main() {
     }
 
     Window(
-        onCloseRequest = ::exitApplication,
+        onCloseRequest = {
+            // Process exit never runs Compose disposal (DisposableEffect's
+            // onDispose), so the normal stop path — Esc → recomposition →
+            // engine.stop() — does not exist here. Tear the session down
+            // synchronously first: playtime is reported (awaited, since the
+            // process dies next) and the engine stops, which flushes the
+            // core's battery RAM to disk. engine.stop() is idempotent, so a
+            // subsequent Compose-driven stop (if the window somehow stays
+            // alive) is a no-op.
+            if (playing != null) {
+                stopPlaying(true)
+                activeEngine.value?.stop()
+            }
+            exitApplication()
+        },
         title = "Omilator",
         state = windowState,
     ) {
@@ -299,7 +331,7 @@ fun main() {
                         .background(Color.Black)
                         .onKeyEvent { event ->
                             if (event.type == KeyEventType.KeyUp && event.key == Key.Escape) {
-                                stopPlaying()
+                                stopPlaying(false)
                                 true
                             } else false
                         },
@@ -311,8 +343,9 @@ fun main() {
                     key(session) {
                         PlayerScreen(
                             gameId = session.romPath,
-                            onClose = stopPlaying,
+                            onClose = { stopPlaying(false) },
                             systemOverride = session.systemOverride,
+                            onEngineReady = { activeEngine.value = it },
                         )
                     }
                 }
@@ -324,9 +357,9 @@ fun main() {
                 settingsViewModel = settingsViewModel,
                 onAddRomDirectory = onAddRomDirectory,
                 isDesktop = true,
-                onPlayRom = { path -> playRom(path) { romPath -> playing = PlayingSession(romPath) } },
+                onPlayRom = { path -> playRom(path, onError = { launchError = it }) { romPath -> playing = PlayingSession(romPath) } },
                 onQuickPlay = {
-                    pickRomFile()?.let { path -> playRom(path) { romPath -> playing = PlayingSession(romPath) } }
+                    pickRomFile()?.let { path -> playRom(path, onError = { launchError = it }) { romPath -> playing = PlayingSession(romPath) } }
                 },
                 onLaunchStandalone = {
                     pickRomFile()?.let { path -> launchStandalone(path) }
@@ -348,6 +381,13 @@ fun main() {
                 onDownloadEmulators = {
                     appScope.launch(Dispatchers.IO) {
                         val installer = EmulatorInstaller()
+                        if (installer.emulators.isEmpty()) {
+                            // Platform-filtered spec list (macOS-only .app
+                            // bundles): nothing to install, and pretending a
+                            // 0/0 download ran would be misleading.
+                            settingsViewModel.setEmulatorsDownloading(false, "Standalone emulators are only provisioned on macOS")
+                            return@launch
+                        }
                         settingsViewModel.setEmulatorsStatus(installer.installedCount(), installer.emulators.size)
                         settingsViewModel.setEmulatorsDownloading(true, "Starting...")
                         for (spec in installer.emulators) {
@@ -446,64 +486,28 @@ private fun atomicWriteText(target: java.nio.file.Path, content: String) {
 private fun playRom(
     romPath: String,
     systemOverride: GameSystem? = null,
+    onError: (String) -> Unit,
     useLibretro: (String) -> Unit,
 ) {
-    // The standalone-emulator fallback is a macOS .app launcher; on other
-    // desktops the blocklist below only prevented the libretro path before
-    // routing into a launcher that cannot work there.
-    if (!isMacOS) {
-        useLibretro(romPath)
-        return
-    }
-    // Server downloads are extensionless .rom cache files: route them by
-    // their known platform instead of the filename, or an explicit server
-    // PSP/GameCube/Wii game would slip past the standalone safety route.
-    val blockedSystemId = if (systemOverride != null) {
-        when (systemOverride) {
-            GameSystem.PSP -> "psp"
-            GameSystem.GAMECUBE, GameSystem.WII -> "gamecube_wii"
-            else -> null
-        }
-    } else {
-        when (File(romPath).extension.lowercase()) {
-            "iso", "cso", "prx" -> "psp"
-            "wbfs", "gcz", "wad", "gcm" -> "gamecube_wii"
-            else -> null
-        }
-    }
-    if (blockedSystemId == null) {
-        // Not a HW-render-blocked system — use libretro
-        useLibretro(romPath)
-        return
-    }
     val registry = StandaloneRegistry()
-    val standalone = registry.forSystem(blockedSystemId)
-    if (standalone != null) {
-        println("[Omilator] Routing $blockedSystemId to ${standalone.displayName} (standalone)")
-        standalone.launch(romPath)
-    } else {
-        // HW-render-blocked system with no standalone installed.
-        // Show error instead of crashing the JVM via libretro+GLFW.
-        val appName = when (blockedSystemId) {
-            "psp" -> "PPSSPP"
-            "gamecube_wii" -> "Dolphin"
-            "ps3" -> "RPCS3"
-            "wii_u" -> "Cemu"
-            "xbox" -> "xemu"
-            else -> "the standalone emulator"
+    when (val route = routeRom(romPath, systemOverride, isMacOS, hasStandalone = { registry.forSystem(it) != null })) {
+        is RomRoute.Libretro -> useLibretro(route.romPath)
+        is RomRoute.Standalone -> {
+            println("[Omilator] Routing ${route.systemId} to ${standaloneAppName(route.systemId)} (standalone)")
+            registry.forSystem(route.systemId)?.launch(route.romPath)
         }
-        val url = when (blockedSystemId) {
-            "psp" -> "https://ppsspp.org/downloads"
-            "gamecube_wii" -> "https://dolphin-emu.org/download/"
-            "ps3" -> "https://rpcs3.net/download"
-            "wii_u" -> "https://cemu.info/releases/"
-            "xbox" -> "https://xemu.app/releases/"
-            else -> ""
+        is RomRoute.Blocked -> {
+            // HW-render-blocked system with no standalone installed. Show a
+            // dialog instead of crashing the JVM via libretro+GLFW — and
+            // instead of the console-only print this path used to be.
+            println("[Omilator] BLOCKED: ${route.systemId} requires ${route.appName} (not installed)")
+            println("[Omilator]   Install: ${route.installUrl}")
+            onError(
+                "${route.appName} is required for this game but is not installed.\n" +
+                    "Install it from ${route.installUrl} (then use Settings → Download emulators), " +
+                    "or pick Install/Update Emulators from the menu.",
+            )
         }
-        println("[Omilator] BLOCKED: $blockedSystemId requires $appName (not installed)")
-        println("[Omilator]   Install: $url")
-        // Defer showing a dialog — for now just print.
-        // TODO: surface as a Compose dialog.
     }
 }
 
@@ -519,14 +523,7 @@ private fun playRom(
  */
 private fun openGameSettings(romPath: String) {
     val ext = File(romPath).extension.lowercase()
-    val systemId = when (ext) {
-        "iso", "cso", "prx" -> "psp"
-        "wbfs", "gcz", "wad", "gcm" -> "gamecube_wii"
-        "pkg", "rap" -> "ps3"
-        "wud", "wux" -> "wii_u"
-        "xiso" -> "xbox"
-        else -> null
-    }
+    val systemId = standaloneSystemIdForExtension(ext)
     val backend = systemId?.let { StandaloneRegistry().forSystem(it) }
     if (backend != null) {
         println("[Omilator] Opening ${backend.displayName} settings for $romPath")
@@ -545,16 +542,7 @@ private fun openGameSettings(romPath: String) {
 
 private fun launchStandalone(romPath: String) {
     val ext = File(romPath).extension.lowercase()
-    val systemId = when (ext) {
-        "iso" -> "psp"  // assume PSP for ISOs (most common modern-retro ISO)
-        "cso", "prx" -> "psp"
-        "wbfs", "gcz", "wad" -> "gamecube_wii"
-        "gcm" -> "gamecube_wii"
-        "pkg", "rap" -> "ps3"
-        "wud", "wux" -> "wii_u"
-        "xiso" -> "xbox"
-        else -> null
-    }
+    val systemId = standaloneSystemIdForExtension(ext)
     if (systemId == null) {
         println("[Omilator] No standalone backend mapping for .$ext files")
         return
@@ -623,6 +611,16 @@ private fun pickRomFile(): String? {
 }
 
 private fun exitApplication() {
-    // Settings saved via the onCloseRequest handler in main()
+    // The onCloseRequest handler in the composition performs the synchronous
+    // session teardown (SRAM flush + playtime report) before this runs.
     kotlin.system.exitProcess(0)
+}
+
+/** Setup completeness: null when every applicable component installed,
+ *  otherwise the user-facing "still missing" message. Pure so the
+ *  platform-filtered counts (emulators are macOS-only) are pinnable. */
+internal fun setupIncompleteMessage(coresMissing: Int, emulatorsMissing: Int): String? {
+    if (coresMissing <= 0 && emulatorsMissing <= 0) return null
+    return "Setup incomplete: $coresMissing core(s) and " +
+        "$emulatorsMissing emulator(s) could not be installed"
 }

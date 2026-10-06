@@ -419,3 +419,90 @@ Android compileDebugKotlinAndroid and iOS compileKotlinIosSimulatorArm64
 green. Desktop entry restructured: `fun main()` loads settings once
 before `application {}`; coresDir now DesktopPaths.coresDir (macOS/Windows
 unchanged — dataDir == configDir there).
+## 2026-10-06 (pass 10) — fresh-eyes adversarial audit: 8 findings, all fixed
+
+Register: untracked pass-A report pinned to 9c2559b, outside the repo
+(.audits). All findings re-verified against HEAD before fixing; auditor
+had no JVM, so every fix was re-verified with builds/tests. Fixed:
+
+- **Desktop window close no longer loses battery saves** (High): the close
+  handler (`onCloseRequest`) used to call `exitProcess(0)` directly —
+  process exit never runs Compose disposal, so `engine.stop()` (the only
+  SRAM flush point) was skipped on the most common quit path (red traffic
+  light, Cmd+W, Cmd+Q), losing every in-game save since launch plus any
+  pending server playtime report. The handler now tears the session down
+  synchronously: playtime is reported with `await=true` (runBlocking —
+  async launches die with the process), `engine.stop()` flushes, then
+  exit. Defense in depth: the engine gained an idempotent `stop()`
+  (close handler + disposal + shutdown hook can all race), a periodic
+  in-run SRAM checkpoint (every 5 s while authoritative — bounds crash
+  loss), and a JVM shutdown hook that performs a bounded flush
+  (`flushSramNow`, 2 s timeout) when the engine was never stopped.
+  `PlayerScreen` gained `onEngineReady` so the window owns a stop handle
+  outside the Compose lifecycle.
+- **SRAM size-mismatch no longer disables saving forever** (Med): the
+  pass-9 gate (correct for failed startups / absent SRAM blocks) had a
+  silent corner — an on-disk save whose size ≠ the core's SRAM block
+  (core update grew the block, save from a different core) failed the
+  read-back check and turned flushing off for the whole session, every
+  launch, with only a console println. New shared decision function
+  `evaluateSramRestore` (desktop + mobile): size mismatch now MIGRATES —
+  old file preserved as `<name>.srm.bak` (never overwritten), core RAM
+  adopted as the start of a new save — and every abnormal condition is
+  surfaced as a banner in the player UI (`PlayerState.sramNotice` /
+  MobilePlayerScreen overlay) instead of console-only. Android's JNI
+  `writeSaveRamNative` is now all-or-nothing like desktop: the partial
+  prefix copy left the core with a HALF-restored block while the gate
+  still refused to flush. `SramStore.backupExisting()` added (default
+  no-op; Android's MobileSramStore renames to a non-clobbering .bak).
+- **macOS local `.iso` quick-play routes through the shared table** (Med):
+  the local-file branch hard-coded `.iso/.cso/.prx → psp`, contradicting
+  GameSystem's documented `.iso → PLAYSTATION` — local PS1 discs went to
+  PPSSPP (rejected) or a console-only BLOCKED print, never to the
+  freshly-installed beetle_psx core. Routing extracted to pure
+  `routeRom()` (+ `RomRouting.kt`): shared-table detection, block exactly
+  {PSP, GAMECUBE, WII}, `Blocked` surfaced through the launch-error
+  dialog (TODO resolved). The explicit launch-standalone path keeps its
+  historic `.iso→psp` assumption via `standaloneSystemIdForExtension`
+  (single table now; openGameSettings/launchStandalone share it).
+- **SettingsViewModel setters are CAS** (Med): all setters converted from
+  read-copy-write to `_state.update { }` — the exact lost-update class
+  pass 9 fixed in the sibling ServerLibraryViewModel (IO-thread status
+  streams from core downloads/first-run setup erasing UI edits and vice
+  versa). `persist()` now snapshots state when the coroutine runs, not at
+  call time.
+- **First-run setup completes on Windows/Linux** (Low): EmulatorInstaller
+  specs are macOS assets (.app bundles, unzip/7z); setup ran them on every
+  OS and could never complete ("3 emulator(s) could not be installed"
+  forever) or installed a mac bundle that can't launch. Spec list is now
+  platform-gated (empty off-macOS), the completeness message is a pure
+  `setupIncompleteMessage()`, and the manual emulator download reports an
+  honest "macOS-only" status instead of a 0/0 download.
+- **Mobile analog polls are neutral, not digital button bits** (Low): the
+  touch input lambda answered by id alone, so RETRO_DEVICE_ANALOG queries
+  (id = axis) read the B/Y touch buttons as stick position. Extracted
+  `TouchInputSource` (port-0-joypad-only, mirrors the JNI guard).
+- **HttpURLConnection leaks closed** (Low): try/finally disconnect around
+  every connection body in CoreDownloader.download, EmulatorInstaller
+  (findAssetUrl/downloadFile), and LibtecaLibrarySource's GETs — which
+  also now check responseCode BEFORE touching inputStream (getInputStream
+  throws on non-2xx, previously skipping disconnect).
+- **SET_SYSTEM_AV_INFO handled** (Low): the env command was silently
+  declined; after a mid-game display-mode change the desktop aspect rect
+  kept the load-time ratio while the bitmap resized. LibretroFfm parses
+  the new retro_system_av_info and notifies via `onSystemAvInfo`;
+  FfmCoreController updates its av-info cache (HW FBO sizing) and forwards
+  through the new `CoreController.setGeometryListener`; PlayerEngine
+  republishes geometry to its state flow so EmulatedSurface recomputes.
+  Also hardened ViewportMath against +Inf aspect ratios (isFinite).
+
+Tests: ui-shared desktopTest 55 (11 classes; new SramRestoreTest,
+TouchInputSourceTest, PlayerEngineSramTest with a fake CoreController
+covering flush-on-stop, migration, periodic checkpoint, flush-without-stop
+= the shutdown-hook body, idempotent stop, failed-loadGame non-clobber,
+mid-run geometry), data-launcher desktopTest 4 (new platform gating),
+core-libretro desktopTest 5 (new FFM SET_SYSTEM_AV_INFO parse test),
+app-desktop desktopTest 11 (new RomRoutingTest incl. setup completeness),
+data-library desktopTest 22 — all green; Android compileDebugKotlinAndroid
++ iOS compileKotlinIosSimulatorArm64 green. No commits made (per
+instruction); tree left dirty for review.

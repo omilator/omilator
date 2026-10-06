@@ -25,19 +25,36 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.awt.image.BufferedImage
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 class PlayerEngine(
     private val corePath: String,
     private val romPath: String,
     private val audioOutput: AudioOutput,
+    /** Interval for the in-run SRAM checkpoint; injectable so tests don't
+     *  wait wall-clock seconds. */
+    private val sramFlushIntervalMillis: Long = DEFAULT_SRAM_FLUSH_MILLIS,
+    /** Injectable controller + data root: the SRAM gate and the shutdown
+     *  flush are engine-level behavior worth pinning with a fake core. */
+    controllerFactory: () -> CoreController = { createCoreController(systemDirectory = DesktopPaths.dataDir) },
+    private val dataDir: String = DesktopPaths.dataDir,
+    /** Tests run without a display/GLFW: the poller's init() loads native
+     *  GLFW, and destroy() is a no-op when init never ran. */
+    private val initializeGamepad: Boolean = true,
 ) {
+    companion object {
+        internal const val DEFAULT_SRAM_FLUSH_MILLIS = 5_000L
+    }
+
     /**
      * Every libretro call runs on this one thread. The core (and the hidden
      * OpenGL context used for HW render) are thread-affine; letting load, run,
@@ -49,23 +66,46 @@ class PlayerEngine(
     }.asCoroutineDispatcher()
 
     private val scope = CoroutineScope(SupervisorJob() + coreDispatcher)
-    private val controller: CoreController = createCoreController(systemDirectory = DesktopPaths.dataDir)
+    private val controller: CoreController = controllerFactory()
     private val converter = FrameConverter()
     private val inputState = InputStateHolder()
     private val gamepadPoller = GamepadPoller()
     private val latestFrame = AtomicReference<Framebuffer?>(null)
 
     private var frameLoop: Job? = null
-    private var _state = MutableStateFlow(PlayerState())
+    private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
 
     /** Speed multiplier for fast-forward (Tab) / slow-motion (Shift+Tab). */
     private var speedMultiplier: Float = 1.0f
 
+    /** Set once stop() begins; the shutdown hook and Compose disposal can
+     *  both race to stop the same engine. */
+    private val stopped = AtomicBoolean(false)
+
+    // Process exit does not run Compose disposal. Every quit gesture that
+    // bypasses the player screen (the window-close handler stops the engine
+    // synchronously, but hard-exit paths remain) still trips shutdown
+    // hooks, so this one bounds itself and flushes the battery save if the
+    // engine was never stopped.
+    private val shutdownHook = Thread {
+        if (!stopped.get()) {
+            runCatching { flushSramNow() }
+        }
+    }
+
+    init {
+        Runtime.getRuntime().addShutdownHook(shutdownHook)
+    }
+
     suspend fun start() = withContext(coreDispatcher) {
-        _state.value = _state.value.copy(isLoading = true)
+        _state.update { it.copy(isLoading = true) }
         try {
             controller.loadCore(corePath)
+            // Geometry can change as early as load_game (cores signal
+            // SET_SYSTEM_AV_INFO during init); the listener must be in
+            // before content load or the first report is lost.
+            controller.setGeometryListener(::onGeometryChanged)
             val avInfo = controller.loadGame(romPath)
             controller.attach(
                 video = VideoSink { fb -> latestFrame.set(fb) },
@@ -73,18 +113,27 @@ class PlayerEngine(
                 input = InputSourceAdapter(inputState),
             )
             audioOutput.configure(avInfo.timing.sampleRate, channels = 2)
-            gamepadPoller.init()
+            if (initializeGamepad) gamepadPoller.init()
             loadPersistedOptions()  // Apply saved core options for this ROM
             restoreSram()
-            _state.value = _state.value.copy(isLoading = false, geometry = avInfo.geometry, fps = avInfo.timing.fps)
+            _state.update {
+                it.copy(isLoading = false, geometry = avInfo.geometry, fps = avInfo.timing.fps, sramNotice = sramNotice)
+            }
             frameLoop = scope.launch { runLoop(avInfo.timing.fps) }
         } catch (t: Throwable) {
             // A half-started engine (core loaded, then loadGame/audio/options
             // failed) must tear itself down — stop() is not guaranteed to
             // run after a startup error.
             teardownNative()
-            _state.value = _state.value.copy(isLoading = false, error = "${t::class.simpleName}: ${t.message}")
+            _state.update { it.copy(isLoading = false, error = "${t::class.simpleName}: ${t.message}") }
         }
+    }
+
+    /** SET_SYSTEM_AV_INFO: the core changed display mode mid-run. Publish
+     *  the new geometry so the aspect-fit rectangle follows it instead of
+     *  staying at the load-time ratio. */
+    private fun onGeometryChanged(geometry: Geometry) {
+        _state.update { it.copy(geometry = geometry) }
     }
 
     /** True once the core's SRAM block actually represents this game's
@@ -94,6 +143,10 @@ class PlayerEngine(
      *  effect leaves fresh core RAM in the slot, and flushing that would
      *  write zeros over the player's only durable battery save. */
     private var sramAuthoritative = false
+
+    /** Non-fatal battery-save condition surfaced in [PlayerState]; null
+     *  when the restore was clean. */
+    private var sramNotice: String? = null
 
     /** Battery saves live in the core's SRAM block; without this round-trip
      *  every exit threw away everything since the last flush. */
@@ -105,23 +158,47 @@ class PlayerEngine(
             sramAuthoritative = true
             return
         }
-        runCatching {
-            val bytes = f.readBytes()
-            if (bytes.isEmpty()) {
-                // A zero-byte save carries nothing to lose.
-                sramAuthoritative = true
-                return
+        val decision = runCatching {
+            evaluateSramRestore(
+                saved = f.readBytes(),
+                readSaveRam = controller::readSaveRam,
+                writeSaveRam = controller::writeSaveRam,
+            )
+        }.getOrNull()
+        when {
+            decision == null ->
+                // The save file itself could not be read; treating fresh RAM
+                // as authoritative risks destroying whatever is on disk.
+                sramNotice = "Battery save could not be read; progress will not be saved this session."
+            decision.migrate -> {
+                // Size mismatch: preserve the old bytes under a backup name
+                // (never overwrite an existing backup) and let the core's
+                // fresh block start a new save.
+                if (backUpSaveFile(f)) {
+                    sramAuthoritative = true
+                    sramNotice = decision.notice
+                } else {
+                    sramNotice = "Battery save could not be backed up; progress will not be saved this session."
+                }
             }
-            controller.writeSaveRam(bytes)
-            // writeSaveRam silently no-ops when the core's SRAM block size
-            // disagrees with the file; verify the restore actually took
-            // before teardown is allowed to flush over that file.
-            sramAuthoritative = bytes.contentEquals(controller.readSaveRam())
-        }
-        if (!sramAuthoritative) {
-            println("[Omilator] SRAM restore did not take; leaving existing battery save untouched")
+            else -> {
+                sramAuthoritative = decision.authoritative
+                sramNotice = decision.notice
+            }
         }
     }
+
+    /** Moves [f] aside as `<name>.srm.bak` (numbered when one exists) so
+     *  both the old bytes and any future save survive. */
+    private fun backUpSaveFile(f: java.io.File): Boolean = runCatching {
+        var target = java.io.File(f.parentFile, "${f.name}.bak")
+        var n = 2
+        while (target.exists()) {
+            target = java.io.File(f.parentFile, "${f.name}.bak$n")
+            n++
+        }
+        f.renameTo(target)
+    }.getOrDefault(false)
 
     private fun flushSram() {
         if (!sramAuthoritative) return
@@ -142,6 +219,17 @@ class PlayerEngine(
         }
     }
 
+    /** One bounded flush hop to the core thread — used by the shutdown hook,
+     *  where a wedged core thread must not hang process exit. Safe (no-op
+     *  failure) after the engine is stopped. */
+    fun flushSramNow(timeoutMillis: Long = 2_000): Boolean = runCatching {
+        runBlocking {
+            withTimeoutOrNull(timeoutMillis) {
+                withContext(coreDispatcher) { flushSram() }
+            }
+        } != null
+    }.getOrDefault(false)
+
     /** Stable per-ROM identity: the basename alone collided across games in
      *  different directories or systems, and hashed into SRAM and option
      *  file names keeps both independent. */
@@ -157,7 +245,7 @@ class PlayerEngine(
         java.io.File(romPath).nameWithoutExtension.replace(Regex("[^A-Za-z0-9._-]"), "_")
 
     private fun sramFile(): java.io.File {
-        val dir = java.io.File(DesktopPaths.dataDir, "saves").apply { mkdirs() }
+        val dir = java.io.File(dataDir, "saves").apply { mkdirs() }
         return java.io.File(dir, "${sanitizedRomBase()}-${romIdHash()}.srm")
     }
 
@@ -165,7 +253,7 @@ class PlayerEngine(
      *  (DesktopPaths, not a rebuilt macOS path) and the same per-ROM
      *  identity, so identically named ROMs never share state slots. */
     fun stateFile(slot: Int): java.io.File {
-        val dir = java.io.File(DesktopPaths.dataDir, "states").apply { mkdirs() }
+        val dir = java.io.File(dataDir, "states").apply { mkdirs() }
         return java.io.File(dir, "${sanitizedRomBase()}-${romIdHash()}.slot$slot.state")
     }
 
@@ -190,7 +278,7 @@ class PlayerEngine(
     }
 
     private fun optionsFile(): java.io.File {
-        val dir = java.io.File(DesktopPaths.dataDir, "options").apply { mkdirs() }
+        val dir = java.io.File(dataDir, "options").apply { mkdirs() }
         // Same identity scheme as SRAM: two identically named ROMs used to
         // share one option file. The content is key=value lines, so the
         // extension says .properties, not .json.
@@ -202,8 +290,13 @@ class PlayerEngine(
      * joining let the unload below race an in-flight retro_run, and cancelling
      * the scope first could kill the unload coroutine before it ever ran.
      * Teardown then happens on the core thread itself.
+     *
+     * Idempotent: the window-close handler, Compose disposal and the JVM
+     * shutdown hook can all race to stop the same engine, and a second full
+     * teardown would join a dead dispatcher.
      */
     fun stop() {
+        if (!stopped.compareAndSet(false, true)) return
         val loop = frameLoop
         frameLoop = null
         runBlocking {
@@ -214,6 +307,10 @@ class PlayerEngine(
         }
         scope.cancel()
         coreDispatcher.close()
+        // The hook's job is done; leaving it registered would keep a stopped
+        // engine reachable until exit. During shutdown this throws, which is
+        // fine (best effort).
+        runCatching { Runtime.getRuntime().removeShutdownHook(shutdownHook) }
     }
 
     /** Idempotent core/audio/input teardown; shared by stop() and the
@@ -225,6 +322,7 @@ class PlayerEngine(
     private fun teardownNative() {
         if (tornDown) return
         tornDown = true
+        runCatching { controller.setGeometryListener(null) }
         runCatching { controller.detach() }
         runCatching { flushSram() }
         runCatching { controller.unloadGame() }
@@ -269,6 +367,12 @@ class PlayerEngine(
     private suspend fun runLoop(targetFps: Float) {
         val baseIntervalNanos = (1_000_000_000.0 / targetFps).toLong()
         var nextDeadline = System.nanoTime()
+        // Crash protection for the battery save: teardown is the only
+        // flush point, so a crash (or any quit path that skips it) lost
+        // every save since launch. A cheap periodic checkpoint bounds the
+        // loss window while the gate is authoritative.
+        val flushEveryFrames = ((targetFps * sramFlushIntervalMillis) / 1000f).toInt().coerceAtLeast(1)
+        var framesSinceFlush = 0
         // The loop observes ITS OWN cancellation: testing the parent scope
         // meant stop()'s cancelAndJoin could wait forever on a loop running
         // behind schedule that never reached a suspension point.
@@ -286,6 +390,10 @@ class PlayerEngine(
 
             controller.runFrame()
             tickRewind()
+            if (++framesSinceFlush >= flushEveryFrames) {
+                framesSinceFlush = 0
+                flushSram()
+            }
 
             // Run-ahead: speculative extra frame for reduced input latency.
             // Display shows 1 frame ahead; state rolls back to real frame.
@@ -411,6 +519,9 @@ data class PlayerState(
     val geometry: Geometry? = null,
     val fps: Float = 60f,
     val error: String? = null,
+    /** Non-fatal battery-save condition (e.g. a size-mismatch migration);
+     *  surfaced as a banner instead of a console-only print. */
+    val sramNotice: String? = null,
 )
 
 private class InputSourceAdapter(private val holder: InputStateHolder) : InputSource {
