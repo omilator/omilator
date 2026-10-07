@@ -23,6 +23,10 @@ import com.omilator.ui.OmilatorApp
 import com.omilator.ui.library.LibraryViewModel
 import com.omilator.ui.player.MobilePlayerScreen
 import com.omilator.ui.player.SramStore
+import com.omilator.ui.player.coreNameForRom
+import com.omilator.ui.player.nextSramBackupName
+import com.omilator.ui.player.sramIdentityHash
+import com.omilator.ui.player.sramSaveFileName
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -245,15 +249,6 @@ class MainActivity : ComponentActivity() {
         val candidate = File(nativeDir, "lib$coreName.so")
         return if (candidate.exists()) candidate.absolutePath else null
     }
-
-    /** Core for a ROM, resolved through the same GameSystem detection the
-     *  scanner uses — the old extension table disagreed with it and silently
-     *  launched unknown systems on mGBA. Null = no mapping. */
-    private fun coreNameForRom(path: String): String? {
-        val ext = path.substringAfterLast('.', "")
-        val system = com.omilator.data.library.GameSystem.detectByExtension(ext) ?: return null
-        return "${system.preferredCore}_libretro"
-    }
 }
 
 /**
@@ -271,12 +266,10 @@ private class MobileSramStore(
     private val file: File
 
     init {
-        val base = File(romPath).nameWithoutExtension.replace(Regex("[^A-Za-z0-9._-]"), "_")
-        val id = java.security.MessageDigest.getInstance("SHA-256")
-            .digest(romIdentity.encodeToByteArray())
-            .take(8)
-            .joinToString("") { "%02x".format(it) }
-        file = File(dir, "$base-$id.srm")
+        // Shared naming scheme (see SramIdentity.kt): sanitized basename +
+        // SHA-256 prefix of a stable ROM identity — identical to the iOS
+        // store, so the scheme cannot drift between mobile platforms.
+        file = File(dir, sramSaveFileName(romPath, sramIdentityHash(romIdentity)))
     }
 
     override fun read(): ByteArray? = file.takeIf { it.exists() }?.readBytes()
@@ -299,12 +292,7 @@ private class MobileSramStore(
      *  existing backup. */
     override fun backupExisting(): Boolean {
         if (!file.exists()) return true
-        var target = File(dir, "${file.name}.bak")
-        var n = 2
-        while (target.exists()) {
-            target = File(dir, "${file.name}.bak$n")
-            n++
-        }
-        return file.renameTo(target)
+        val name = nextSramBackupName(file.name) { candidate -> File(dir, candidate).exists() }
+        return file.renameTo(File(dir, name))
     }
 }

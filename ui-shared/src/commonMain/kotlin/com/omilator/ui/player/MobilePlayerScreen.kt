@@ -193,6 +193,18 @@ fun MobilePlayerScreen(
                 frameW = avInfo.geometry.baseWidth.toInt()
                 frameH = avInfo.geometry.baseHeight.toInt()
                 audioOutput.configure(avInfo.timing.sampleRate, channels = 2)
+                // Mid-run SET_SYSTEM_AV_INFO: geometry is tracked per frame
+                // below, but timing must be forwarded explicitly — the loop
+                // paces and the audio output are configured once otherwise,
+                // and an fps/sample-rate switch would desync them until the
+                // screen is reopened. Fires on the core thread (inside
+                // runFrame), the same thread that calls write(), so the
+                // reconfigure never races it.
+                val intervalNanos = atomic((1_000_000_000.0 / avInfo.timing.fps).toLong())
+                coreController.setSystemAvInfoListener { info ->
+                    intervalNanos.value = (1_000_000_000.0 / info.timing.fps).toLong()
+                    runCatching { audioOutput.configure(info.timing.sampleRate, channels = 2) }
+                }
                 val latestFrame = arrayOfNulls<Framebuffer>(1)
                 coreController.attach(
                     video = { fb -> latestFrame[0] = fb },
@@ -201,8 +213,9 @@ fun MobilePlayerScreen(
                 )
                 isLoading = false
                 // Nanosecond deadlines: (1000/fps).toLong() truncated 60 Hz
-                // to 16 ms and overdrives the core by ~2.5%.
-                val intervalNanos = (1_000_000_000.0 / avInfo.timing.fps).toLong()
+                // to 16 ms and overdrives the core by ~2.5%. Re-read from
+                // the atomic every iteration so a mid-run timing change
+                // (see the av-info listener above) takes effect live.
                 var deadline = TimeSource.Monotonic.markNow()
                 while (currentCoroutineContext().isActive) {
                     coreController.runFrame()
@@ -215,7 +228,7 @@ fun MobilePlayerScreen(
                             }
                         }
                     }
-                    deadline += intervalNanos.nanoseconds
+                    deadline += intervalNanos.value.nanoseconds
                     val remaining = deadline - TimeSource.Monotonic.markNow()
                     if (remaining > Duration.ZERO) delay(remaining.inWholeMilliseconds)
                     else deadline = TimeSource.Monotonic.markNow()
@@ -228,6 +241,7 @@ fun MobilePlayerScreen(
                 // and the core MUST still be unloaded rather than left
                 // running with dangling callbacks.
                 withContext(NonCancellable + Dispatchers.Default) {
+                    runCatching { coreController.setSystemAvInfoListener(null) }
                     // SRAM flush precedes unload: retro_unload_game is where
                     // some cores hand the final battery block back.
                     runCatching {

@@ -3,6 +3,7 @@ package com.omilator.ui.player
 import com.omilator.core.audio.AudioOutput
 import com.omilator.core.input.GamepadPoller
 import com.omilator.core.libretro.api.CoreController
+import com.omilator.core.libretro.api.AvInfo
 import com.omilator.core.libretro.api.Framebuffer
 import com.omilator.core.libretro.api.Geometry
 import com.omilator.core.libretro.api.InputDevice
@@ -53,6 +54,11 @@ class PlayerEngine(
 ) {
     companion object {
         internal const val DEFAULT_SRAM_FLUSH_MILLIS = 5_000L
+
+        /** Below this, fps differences are float noise (59.940 vs 59.9401),
+         *  not a mode change worth reconfiguring audio/pacing for. */
+        private const val FPS_CHANGE_EPSILON = 0.01f
+        private const val SAMPLE_RATE_EPSILON = 1.0
     }
 
     /**
@@ -72,6 +78,10 @@ class PlayerEngine(
     private val gamepadPoller = GamepadPoller()
     private val latestFrame = AtomicReference<Framebuffer?>(null)
 
+    /** Volatile: stop() reads this from the window thread while start()'s
+     *  core-thread block assigns it at its tail — the exact interleaving
+     *  the close-during-load race lives in. */
+    @Volatile
     private var frameLoop: Job? = null
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
@@ -102,10 +112,10 @@ class PlayerEngine(
         _state.update { it.copy(isLoading = true) }
         try {
             controller.loadCore(corePath)
-            // Geometry can change as early as load_game (cores signal
+            // Geometry/timing can change as early as load_game (cores signal
             // SET_SYSTEM_AV_INFO during init); the listener must be in
             // before content load or the first report is lost.
-            controller.setGeometryListener(::onGeometryChanged)
+            controller.setSystemAvInfoListener(::onSystemAvInfo)
             val avInfo = controller.loadGame(romPath)
             controller.attach(
                 video = VideoSink { fb -> latestFrame.set(fb) },
@@ -116,6 +126,9 @@ class PlayerEngine(
             if (initializeGamepad) gamepadPoller.init()
             loadPersistedOptions()  // Apply saved core options for this ROM
             restoreSram()
+            frameIntervalNanosFor(avInfo.timing.fps).let { targetFrameIntervalNanos = it }
+            currentFps = avInfo.timing.fps
+            currentSampleRate = avInfo.timing.sampleRate
             _state.update {
                 it.copy(isLoading = false, geometry = avInfo.geometry, fps = avInfo.timing.fps, sramNotice = sramNotice)
             }
@@ -131,10 +144,40 @@ class PlayerEngine(
 
     /** SET_SYSTEM_AV_INFO: the core changed display mode mid-run. Publish
      *  the new geometry so the aspect-fit rectangle follows it instead of
-     *  staying at the load-time ratio. */
-    private fun onGeometryChanged(geometry: Geometry) {
-        _state.update { it.copy(geometry = geometry) }
+     *  staying at the load-time ratio — and follow the timing half too:
+     *  pacing and the audio config used to be computed once at start and
+     *  never updated, so an fps/sample-rate switch desynced A/V until the
+     *  player was reopened. */
+    private fun onSystemAvInfo(info: AvInfo) {
+        _state.update { it.copy(geometry = info.geometry, fps = info.timing.fps) }
+        if (kotlin.math.abs(info.timing.fps - currentFps) > FPS_CHANGE_EPSILON) {
+            currentFps = info.timing.fps
+            targetFrameIntervalNanos = frameIntervalNanosFor(info.timing.fps)
+        }
+        if (kotlin.math.abs(info.timing.sampleRate - currentSampleRate) > SAMPLE_RATE_EPSILON) {
+            currentSampleRate = info.timing.sampleRate
+            // Fires on the core thread (inside runFrame/loadGame) — the
+            // same thread start() configured the output on, so configure
+            // never races write().
+            runCatching { audioOutput.configure(info.timing.sampleRate, channels = 2) }
+        }
     }
+
+    /** Run-loop pacing source, in nanoseconds: read fresh every iteration
+     *  so a mid-run timing change takes effect without restarting the
+     *  loop. Visible to tests (desktopTest is the same module). */
+    @Volatile
+    internal var targetFrameIntervalNanos = 0L
+        private set
+
+    @Volatile
+    private var currentFps = 0f
+
+    @Volatile
+    private var currentSampleRate = 0.0
+
+    private fun frameIntervalNanosFor(fps: Float): Long =
+        (1_000_000_000.0 / fps.coerceAtLeast(0.1f)).toLong()
 
     /** True once the core's SRAM block actually represents this game's
      *  battery save (a restored one, or a fresh one when no save file
@@ -297,15 +340,23 @@ class PlayerEngine(
      */
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
-        val loop = frameLoop
-        frameLoop = null
+        // Cancel the scope BEFORE the teardown hop and BEFORE reading
+        // frameLoop. The old order (snapshot loop → teardown → cancel)
+        // missed the close-during-load window: start() assigns frameLoop
+        // at the tail of its own core-thread block, so a stop() that
+        // arrives mid-loadGame snapshots null, tears the core down — and
+        // the just-launched loop task, not yet cancelled at its liveness
+        // check, could execute one retro_run against the unloaded core.
+        // Cancelling first means any loop task start() launches from now
+        // on is born cancelled and never runs; the volatile re-read below
+        // joins a task that was already in flight.
+        scope.cancel()
         runBlocking {
-            loop?.cancelAndJoin()
+            frameLoop?.cancelAndJoin()
             withContext(coreDispatcher) {
                 teardownNative()
             }
         }
-        scope.cancel()
         coreDispatcher.close()
         // The hook's job is done; leaving it registered would keep a stopped
         // engine reachable until exit. During shutdown this throws, which is
@@ -322,7 +373,7 @@ class PlayerEngine(
     private fun teardownNative() {
         if (tornDown) return
         tornDown = true
-        runCatching { controller.setGeometryListener(null) }
+        runCatching { controller.setSystemAvInfoListener(null) }
         runCatching { controller.detach() }
         runCatching { flushSram() }
         runCatching { controller.unloadGame() }
@@ -365,7 +416,6 @@ class PlayerEngine(
     }
 
     private suspend fun runLoop(targetFps: Float) {
-        val baseIntervalNanos = (1_000_000_000.0 / targetFps).toLong()
         var nextDeadline = System.nanoTime()
         // Crash protection for the battery save: teardown is the only
         // flush point, so a crash (or any quit path that skips it) lost
@@ -375,8 +425,10 @@ class PlayerEngine(
         var framesSinceFlush = 0
         // The loop observes ITS OWN cancellation: testing the parent scope
         // meant stop()'s cancelAndJoin could wait forever on a loop running
-        // behind schedule that never reached a suspension point.
-        while (currentCoroutineContext().isActive) {
+        // behind schedule that never reached a suspension point. The
+        // stopped flag backstops the (now first-class) scope cancellation
+        // against a resume already past the liveness check.
+        while (currentCoroutineContext().isActive && !stopped.get()) {
             currentCoroutineContext().ensureActive()
             // Poll gamepad before each frame. Gamepad writes go to the
             // gamepad-owned mask only — the poller reports every button
@@ -423,8 +475,10 @@ class PlayerEngine(
                 } catch (_: Throwable) {}
             }
 
-            // Adjust deadline by speed multiplier (fast forward / slow motion)
-            val interval = (baseIntervalNanos / speedMultiplier).toLong()
+            // Adjust deadline by speed multiplier (fast forward / slow motion).
+            // The interval is re-read each iteration: a mid-run
+            // SET_SYSTEM_AV_INFO timing change updates it live.
+            val interval = (targetFrameIntervalNanos / speedMultiplier).toLong()
             nextDeadline += interval
             val now = System.nanoTime()
             val wait = nextDeadline - now

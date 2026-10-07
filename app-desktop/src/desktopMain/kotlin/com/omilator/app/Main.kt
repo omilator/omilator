@@ -56,9 +56,14 @@ import com.omilator.data.library.LibtecaLibrarySource
 import com.omilator.ui.player.PlayerEngine
 import com.omilator.ui.player.PlayerScreen
 import com.omilator.ui.settings.SettingsViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
@@ -164,6 +169,10 @@ fun main() {
     // outlive the server page (and its ViewModel) that started the session,
     // and reporting must not leak a detached thread per session.
     val sessionReportScope = rememberCoroutineScope()
+    // Esc-fired (async) reports are tracked here so the window-close path
+    // can join them before exitProcess(0) — an in-flight POST otherwise
+    // dies with the process when the user closes within the request window.
+    val pendingReports = remember { PendingPlaytimeReports(sessionReportScope) }
     var launchError by remember { mutableStateOf<String?>(null) }
 
     val serverPage: (@Composable () -> Unit)? = if (serverConfigured) {
@@ -199,10 +208,22 @@ fun main() {
                                             // Window-close path: the process exits right
                                             // after, so the report must complete before
                                             // exitProcess(0) — an async launch would be
-                                            // discarded with the process.
-                                            kotlinx.coroutines.runBlocking { send() }
+                                            // discarded with the process. Bounded to the
+                                            // close budget: the interactive 10s/30s socket
+                                            // timeouts are for gameplay, not exit — an
+                                            // unreachable server must not beachball the UI
+                                            // for ~40s ahead of (or instead of) teardown.
+                                            val sent = runBlocking {
+                                                withTimeoutOrNull(CLOSE_REPORT_BUDGET_MS) { send() }
+                                            } != null
+                                            if (!sent) {
+                                                System.err.println(
+                                                    "[Omilator] Session report did not complete within " +
+                                                        "${CLOSE_REPORT_BUDGET_MS}ms at close; dropped",
+                                                )
+                                            }
                                         } else {
-                                            sessionReportScope.launch { send() }
+                                            pendingReports.launch(send)
                                         }
                                     }
                                     report
@@ -305,15 +326,21 @@ fun main() {
             // Process exit never runs Compose disposal (DisposableEffect's
             // onDispose), so the normal stop path — Esc → recomposition →
             // engine.stop() — does not exist here. Tear the session down
-            // synchronously first: playtime is reported (awaited, since the
-            // process dies next) and the engine stops, which flushes the
-            // core's battery RAM to disk. engine.stop() is idempotent, so a
-            // subsequent Compose-driven stop (if the window somehow stays
-            // alive) is a no-op.
+            // synchronously first, FLUSH-FIRST: engine.stop() persists the
+            // core's battery RAM before any network wait, so an unreachable
+            // server can no longer defer (or, with a force-quit during the
+            // old inline ~40s POST, skip) the SRAM flush. engine.stop() is
+            // idempotent, so a subsequent Compose-driven stop (if the
+            // window somehow stays alive) is a no-op; after Esc it is a
+            // no-op on the already-disposed engine.
+            activeEngine.value?.stop()
             if (playing != null) {
                 stopPlaying(true)
-                activeEngine.value?.stop()
             }
+            // Esc-then-close inside the request window: join in-flight
+            // async reports (bounded — same loss class as a timeout)
+            // before the process dies.
+            runBlocking { pendingReports.awaitAll(CLOSE_REPORT_BUDGET_MS) }
             exitApplication()
         },
         title = "Omilator",
@@ -623,4 +650,48 @@ internal fun setupIncompleteMessage(coresMissing: Int, emulatorsMissing: Int): S
     if (coresMissing <= 0 && emulatorsMissing <= 0) return null
     return "Setup incomplete: $coresMissing core(s) and " +
         "$emulatorsMissing emulator(s) could not be installed"
+}
+
+/** Budget for playtime POSTs on the window-close path. The HTTP layer's
+ *  interactive timeouts (10s connect / 30s read) exist for gameplay-time
+ *  requests; at close they freeze the UI ahead of the SRAM flush. A report
+ *  that misses the budget is dropped — the same loss class as a POST that
+ *  fails outright. */
+internal const val CLOSE_REPORT_BUDGET_MS = 3_000L
+
+/**
+ * Tracks asynchronously launched session reports so the close path can
+ * join them before exitProcess(0): Esc fires a report in the background,
+ * and closing the window inside the request window used to kill the POST
+ * mid-flight (connection aborted, or never dispatched because the Main
+ * thread was already inside exit) — that session's playtime silently
+ * vanished server-side.
+ *
+ * Pure bookkeeping over a caller-supplied scope; pinnable without a
+ * window or a real server.
+ */
+internal class PendingPlaytimeReports(private val scope: CoroutineScope) {
+    private val jobs = java.util.concurrent.ConcurrentLinkedQueue<Job>()
+
+    fun launch(send: suspend () -> Unit): Job {
+        val job = scope.launch { send() }
+        jobs.add(job)
+        return job
+    }
+
+    /** Bounded join of every outstanding report. Returns true when all
+     *  completed within [timeoutMillis]; false when the budget expired
+     *  with reports still in flight (they are abandoned — the process is
+     *  exiting). Completed jobs are pruned so the queue cannot grow
+     *  unboundedly across a long session. */
+    suspend fun awaitAll(timeoutMillis: Long): Boolean =
+        withTimeoutOrNull(timeoutMillis) {
+            while (true) {
+                jobs.removeIf { it.isCompleted }
+                val pending = jobs.toList()
+                if (pending.isEmpty()) break
+                pending.joinAll()
+            }
+            true
+        } ?: false
 }

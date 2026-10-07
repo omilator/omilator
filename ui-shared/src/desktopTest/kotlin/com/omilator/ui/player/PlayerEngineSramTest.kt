@@ -58,13 +58,21 @@ class PlayerEngineSramTest {
         override fun unloadGame() {}
         override fun unloadCore() {}
 
-        private var geometryListener: ((Geometry) -> Unit)? = null
-        override fun setGeometryListener(listener: ((Geometry) -> Unit)?) {
-            geometryListener = listener
+        private var systemAvInfoListener: ((AvInfo) -> Unit)? = null
+        override fun setSystemAvInfoListener(listener: ((AvInfo) -> Unit)?) {
+            systemAvInfoListener = listener
         }
 
         fun emitGeometry(g: Geometry) {
-            geometryListener?.invoke(g)
+            systemAvInfoListener?.invoke(
+                AvInfo(geometry = g, timing = Timing(fps = 60f, sampleRate = 48000.0)),
+            )
+        }
+
+        fun emitAvInfo(g: Geometry, fps: Float, sampleRate: Double) {
+            systemAvInfoListener?.invoke(
+                AvInfo(geometry = g, timing = Timing(fps = fps, sampleRate = sampleRate)),
+            )
         }
 
         override fun attach(video: VideoSink, audio: AudioSink, input: InputSource) {}
@@ -96,7 +104,9 @@ class PlayerEngineSramTest {
         override var sampleRate: Double = 48000.0
         override var channels: Int = 2
         var releases = 0
+        var configures = 0
         override fun configure(sampleRate: Double, channels: Int) {
+            configures++
             this.sampleRate = sampleRate
             this.channels = channels
         }
@@ -322,6 +332,58 @@ class PlayerEngineSramTest {
         // Core switches display mode (SET_SYSTEM_AV_INFO equivalent).
         controller.emitGeometry(Geometry(640u, 480u, 1024u, 768u, 16f / 9f))
         assertEquals(16f / 9f, engine.state.value.geometry?.aspectRatio, "geometry change must reach player state")
+        engine.stop()
+    }
+
+    @Test
+    fun systemAvInfoTimingRepacesLoopAndReconfiguresAudio() {
+        val controller = FakeCoreController()
+        val dir = tempDir()
+        val audio = FakeAudioOutput()
+        val romPath = File(dir, "game.gba").apply { writeText("rom") }.absolutePath
+        val engine = PlayerEngine(
+            corePath = "/fake/core.dylib",
+            romPath = romPath,
+            audioOutput = audio,
+            controllerFactory = { controller },
+            dataDir = dir.absolutePath,
+            initializeGamepad = false,
+        )
+        controller.sramBlock = ByteArray(128)
+        startAndWait(engine)
+        assertEquals(60f, engine.state.value.fps)
+        assertEquals(48000.0, audio.sampleRate)
+        assertEquals(1_000_000_000L / 60L, engine.targetFrameIntervalNanos, "load-time pacing must be 60 Hz")
+
+        // PAL-style switch: 50 fps + 44.1 kHz via SET_SYSTEM_AV_INFO.
+        controller.emitAvInfo(Geometry(320u, 240u, 1024u, 768u, 4f / 3f), fps = 50f, sampleRate = 44100.0)
+        assertEquals(50f, engine.state.value.fps, "fps change must reach player state")
+        assertEquals(44100.0, audio.sampleRate, "audio pipeline must be reconfigured to the new rate")
+        assertEquals(1_000_000_000L / 50L, engine.targetFrameIntervalNanos, "run-loop pacing must follow the new fps")
+        engine.stop()
+    }
+
+    @Test
+    fun floatNoiseTimingDoesNotChurnAudioConfig() {
+        val controller = FakeCoreController()
+        val dir = tempDir()
+        val audio = FakeAudioOutput()
+        val romPath = File(dir, "game.gba").apply { writeText("rom") }.absolutePath
+        val engine = PlayerEngine(
+            corePath = "/fake/core.dylib",
+            romPath = romPath,
+            audioOutput = audio,
+            controllerFactory = { controller },
+            dataDir = dir.absolutePath,
+            initializeGamepad = false,
+        )
+        controller.sramBlock = ByteArray(128)
+        startAndWait(engine)
+        val configures = audio.configures
+
+        // 59.995 fps / +0.5 Hz is float noise, not a mode change.
+        controller.emitAvInfo(Geometry(320u, 240u, 1024u, 768u, 4f / 3f), fps = 59.995f, sampleRate = 48000.5)
+        assertEquals(configures, audio.configures, "noise-level timing change must not reconfigure audio")
         engine.stop()
     }
 }

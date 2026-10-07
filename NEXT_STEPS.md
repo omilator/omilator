@@ -506,3 +506,69 @@ app-desktop desktopTest 11 (new RomRoutingTest incl. setup completeness),
 data-library desktopTest 22 — all green; Android compileDebugKotlinAndroid
 + iOS compileKotlinIosSimulatorArm64 green. No commits made (per
 instruction); tree left dirty for review.
+
+## 2026-10-06 (pass 11) — pass-B adversarial audit: 6 findings, all fixed
+
+Register: untracked pass-B report pinned to 4a08fb4, outside the repo
+(.audits). All findings re-verified against HEAD before fixing (the
+auditor ran the desktop suite twice, 97/97, JDK 21). Fixed:
+
+- **iOS now composes the shared MobilePlayerScreen** (Med): the roadmap
+  claimed iOS/Android shared it since v0.6, but only Android ever called
+  it — iOS kept a 614-line fork with zero SRAM code (battery saves never
+  persisted on iOS, ever), the id-only input lambda pass 10 fixed
+  elsewhere, and none of the pass-9/10 SRAM gate/migration/notice work.
+  `IosPlayerScreen` deleted; `RootViewController` composes
+  `MobilePlayerScreen` with a new `IosSramStore` (POSIX fopen/fwrite +
+  tmp+rename atomic replace, `.bak`-numbered backups, same identity
+  scheme as Android via shared `SramIdentity.kt`: sanitized basename +
+  16-hex SHA-256 prefix of a stable ROM identity; expect/actual digest —
+  JCA on desktop/Android, CommonCrypto CC_SHA256 on iOS). Android's
+  `MobileSramStore` now derives its naming from the same helpers.
+- **iOS ext→core routing unified on the shared table** (Low): the three
+  private `when(ext)` tables in RootViewController (library, quick-play,
+  deep-link — two of them routed `.iso` to different wrong cores, all
+  three fell back to mGBA on unknown extensions) replaced by one
+  `requestPlay` seam over `coreNameForRom()` (new, commonMain:
+  `GameSystem.detectByExtension` → `<preferredCore>_libretro`). No
+  mapping / core-not-installed now surfaces as an AlertDialog instead of
+  a silent mGBA launch or silent no-op. Android's MainActivity consumes
+  the same function.
+- **Close path is bounded and flush-first** (Low): the awaited playtime
+  POST ran inline on the UI thread with the interactive 10 s/30 s socket
+  budget — an unreachable server beachballed the window ~40 s before the
+  SRAM flush. The close handler now stops the engine FIRST (save is
+  durable before any network wait), the awaited report is bounded by
+  `CLOSE_REPORT_BUDGET_MS` (3 s, drop-on-timeout), and pending async
+  reports are joined within the same budget.
+- **Esc-then-close no longer loses the async playtime report** (Low):
+  `exitProcess(0)` never joined `sessionReportScope`'s in-flight POST.
+  New `PendingPlaytimeReports` tracker (`launch`/`awaitAll(timeout)`,
+  completed jobs pruned) — the close handler awaits it before exit.
+- **stop() racing in-flight start() can no longer run a frame after
+  unload** (Low): close-during-load used to snapshot `frameLoop` (null
+  while start()'s core-thread block hadn't reached its tail), tear the
+  core down, and cancel the scope only afterwards — leaving a window
+  where the just-launched loop task passed its liveness check and ran
+  one retro_run against the unloaded core (native UAF). `stop()` now
+  cancels the scope BEFORE the teardown hop and re-reads the (now
+  `@Volatile`) `frameLoop` to join anything in flight; the run loop also
+  checks `stopped` at its top as a backstop.
+- **SET_SYSTEM_AV_INFO timing is forwarded, not just parsed** (Low): the
+  env handler built the full AvInfo but the listener channel was
+  geometry-only, so run-loop pacing and the audio config stayed at
+  load-time values forever (PAL↔NTSC desync). `setGeometryListener`
+  widened to `setSystemAvInfoListener((AvInfo) -> Unit)`;
+  PlayerEngine updates `PlayerState.fps`, re-paces via a volatile
+  interval read per iteration, and reconfigures the audio output on
+  real (epsilon-bounded) sample-rate changes; MobilePlayerScreen
+  registers the same listener for live pacing + audio reconfigure.
+
+Tests: ui-shared desktopTest 72 (+CoreNameForRomTest 7, +SramIdentityTest
+7, +PlayerEngineStopRaceTest 1 — latch-blocked loadGame with a sequenced
+fake core pinning no-runFrame-after-unloadGame; PlayerEngineSramTest
++2 timing tests and the fake emits full AvInfo), app-desktop desktopTest
+15 (+PendingPlaytimeReportsTest 4); full forced rerun 118/118 green;
+Android compileDebugKotlinAndroid + iOS compileKotlinIosArm64 /
+IosSimulatorArm64 / IosX64 green. No commits made (per instruction); tree
+left dirty for review.

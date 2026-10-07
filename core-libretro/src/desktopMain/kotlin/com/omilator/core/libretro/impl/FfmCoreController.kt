@@ -135,12 +135,12 @@ internal class FfmCoreController(
         inputSource = input
     }
 
-    private var geometryListener: ((Geometry) -> Unit)? = null
+    private var systemAvInfoListener: ((AvInfo) -> Unit)? = null
 
     /** SET_SYSTEM_AV_INFO: update the cached av info (the HW-render FBO is
      *  sized from it) and forward the geometry to the frontend listener. */
-    override fun setGeometryListener(listener: ((Geometry) -> Unit)?) {
-        geometryListener = listener
+    override fun setSystemAvInfoListener(listener: ((AvInfo) -> Unit)?) {
+        systemAvInfoListener = listener
     }
 
     override fun detach() {
@@ -254,7 +254,10 @@ internal class FfmCoreController(
             ),
         )
         avInfoCache = info
-        geometryListener?.invoke(info.geometry)
+        // Full av-info, not just geometry: the timing half (fps, sample
+        // rate) is what keeps run-loop pacing and the audio pipeline on
+        // the core's clock after a mid-game display-mode change.
+        systemAvInfoListener?.invoke(info)
     }
 
     private fun Int.toEnum() = when (this) {
