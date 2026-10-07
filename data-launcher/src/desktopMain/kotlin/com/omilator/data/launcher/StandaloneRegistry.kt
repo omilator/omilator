@@ -6,8 +6,9 @@ import com.omilator.data.launcher.backends.PpssppBackend
 import com.omilator.data.launcher.backends.Rpcs3Backend
 import com.omilator.data.launcher.backends.XemuBackend
 
-actual class StandaloneRegistry {
-    actual val all: List<StandaloneBackend> = listOf(
+/** Registry of desktop standalone emulators; mobile players use libretro. */
+class StandaloneRegistry {
+    val all: List<StandaloneBackend> = listOf(
         PpssppBackend(),
         DolphinBackend(),
         Rpcs3Backend(),
@@ -15,8 +16,8 @@ actual class StandaloneRegistry {
         XemuBackend(),
     )
 
-    actual fun available(): List<StandaloneBackend> = all.filter { it.isInstalled() }
+    fun available(): List<StandaloneBackend> = all.filter { it.isInstalled() }
 
-    actual fun forSystem(systemId: String): StandaloneBackend? =
+    fun forSystem(systemId: String): StandaloneBackend? =
         all.firstOrNull { it.systemId.equals(systemId, ignoreCase = true) && it.isInstalled() }
 }

@@ -7,8 +7,10 @@ package com.omilator.data.launcher
  * Used for systems where libretro cores don't exist (PS3, Wii U, Xbox)
  * or where the libretro path is blocked on macOS (PPSSPP/Dolphin HW render).
  *
- * Implementations are platform-specific — macOS uses NSApp via `open -a`,
- * Linux uses flatpak/binary paths, Windows uses .exe paths.
+ * This API belongs to desktopMain: its result is a JVM process handle, and
+ * mobile players use in-process libretro cores instead of desktop apps.
+ * macOS launches via `open -a`; other desktop platforms can supply their
+ * own executable launch implementations.
  */
 interface StandaloneBackend {
 
@@ -56,14 +58,4 @@ interface StandaloneBackend {
      * own settings menu without launching the game.
      */
     fun openSettingsGuiOnly(): Process? = null
-}
-
-/**
- * Registry of all known standalone backends on this platform.
- * Call [availableBackends] to get only the installed ones.
- */
-expect class StandaloneRegistry() {
-    val all: List<StandaloneBackend>
-    fun available(): List<StandaloneBackend>
-    fun forSystem(systemId: String): StandaloneBackend?
 }
