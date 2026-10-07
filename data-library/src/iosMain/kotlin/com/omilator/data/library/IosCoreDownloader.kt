@@ -24,43 +24,21 @@ import platform.posix.fread
  */
 class IosCoreDownloader(private val coresDir: String) {
 
-    data class CoreEntry(val name: String, val system: String, val urlName: String)
-
     /**
-     * Core entries. `name` is the local filename stem (`<name>_libretro.dylib`
-     * in Documents/cores/). `urlName` is the buildbot's dylib stem — usually
-     * `<name>_libretro_ios` but historically a few cores drop the `_ios` and
-     * a couple (mednafen_psx_hw) are uploaded under a different name than
-     * their libretro core id.
+     * Install catalog, declared in common so the routing invariant — every
+     * `<GameSystem.preferredCore>_libretro` the launcher can request is an
+     * install stem here — is pinned by MobileCoreCatalogTest. Entry fields:
+     * `name` installs as `<name>_libretro.dylib` (the name
+     * coreNameForRom/corePathFor resolve); `urlName` is the buildbot's full
+     * artifact stem — mostly `<core>_libretro_ios`, with a few cores
+     * dropping the `_ios` and beetle_psx_hw published under its legacy
+     * mednafen_psx_hw name (same mapping Android carries).
      */
-    val cores: List<CoreEntry> = listOf(
-        CoreEntry("mgba", "GB / GBC / GBA", "mgba_libretro"),
-        CoreEntry("mesen", "NES", "mesen_libretro"),
-        CoreEntry("snes9x", "SNES", "snes9x_libretro"),
-        CoreEntry("genesis_plus_gx", "Genesis / Mega Drive", "genesis_plus_gx_libretro"),
-        CoreEntry("mupen64plus_next", "N64 (software render)", "mupen64plus_next_libretro"),
-        CoreEntry("mednafen_psx_hw", "PS1 (accurate)", "mednafen_psx_hw_libretro"),
-        CoreEntry("pcsx_rearmed", "PS1 (fast)", "pcsx_rearmed_libretro"),
-        CoreEntry("melonds", "DS", "melonds_libretro"),
-        CoreEntry("mednafen_saturn", "Saturn", "mednafen_saturn_libretro"),
-        CoreEntry("nestopia", "NES (alt)", "nestopia_libretro"),
-        CoreEntry("gambatte", "GB / GBC (alt)", "gambatte_libretro"),
-        CoreEntry("sameboy", "GB / GBC (accurate)", "sameboy_libretro"),
-        CoreEntry("fbneo", "Arcade", "fbneo_libretro"),
-        CoreEntry("picodrive", "Genesis / 32X", "picodrive_libretro"),
-        // HW-render cores (Vulkan via MoltenVK). Require MoltenVK.xcframework
-        // bundled in the app (see setup-moltenvk.sh + iosApp/project.yml).
-        // SET_HW_RENDER handler in NativeCoreController.kt accepts VULKAN
-        // context_type. NOTE: actual rendering needs swapchain plumbing —
-        // cores will load but render black until VulkanHwRender.kt is finished.
-        CoreEntry("ppsspp", "PSP (HW render — Vulkan)", "ppsspp_libretro"),
-        CoreEntry("dolphin", "GameCube / Wii (HW render — Vulkan)", "dolphin_libretro"),
-        CoreEntry("flycast", "Dreamcast (HW render — Vulkan)", "flycast_libretro"),
-    )
+    val cores: List<MobileCoreEntry> = IosCoreCatalog.entries
 
     private val buildbotBase = "https://buildbot.libretro.com/nightly/apple/ios-arm64/latest"
 
-    fun isInstalled(entry: CoreEntry): Boolean {
+    fun isInstalled(entry: MobileCoreEntry): Boolean {
         return NSFileManager.defaultManager.fileExistsAtPath(finalPath(entry))
     }
 
@@ -71,7 +49,7 @@ class IosCoreDownloader(private val coresDir: String) {
      * Dispatchers.IO or a coroutine on Dispatchers.Default. Returns true
      * on success. onProgress receives human-readable status updates.
      */
-    fun download(entry: CoreEntry, onProgress: (String) -> Unit = {}): Boolean {
+    fun download(entry: MobileCoreEntry, onProgress: (String) -> Unit = {}): Boolean {
         val fm = NSFileManager.defaultManager
         fm.createDirectoryAtPath(
             coresDir,
@@ -155,7 +133,7 @@ class IosCoreDownloader(private val coresDir: String) {
         return installed
     }
 
-    private fun finalPath(entry: CoreEntry): String = "$coresDir/${entry.name}_libretro.dylib"
+    private fun finalPath(entry: MobileCoreEntry): String = "$coresDir/${entry.name}_libretro.dylib"
 
     private fun cleanup(path: String) {
         // rm -rf is fine here — paths come from NSSearchPathForDirectoriesInDomains

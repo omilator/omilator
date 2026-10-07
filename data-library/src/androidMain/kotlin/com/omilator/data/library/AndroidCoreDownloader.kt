@@ -16,44 +16,12 @@ import java.util.zip.ZipInputStream
 class AndroidCoreDownloader(private val coresDir: File) {
 
     /**
-     * @param name canonical local core name — installs as `<name>_libretro.so`,
-     *   which is what the launcher's core resolution looks for.
-     * @param urlName the buildbot's artifact stem; usually `<name>_libretro`
-     *   but a couple of cores (beetle_psx_hw) are uploaded under a different
-     *   name than their libretro core id.
-     * @param artifact full zip filename on the buildbot when it deviates from
-     *   `<urlName>_android.so.zip` (azahar drops the `_android` infix).
+     * Install catalog, declared in common so the routing invariant — every
+     * `<GameSystem.preferredCore>_libretro` the launcher can request is an
+     * install stem here — is pinned by MobileCoreCatalogTest. Entry fields
+     * follow the shared [MobileCoreEntry] docs.
      */
-    data class CoreEntry(
-        val name: String,
-        val system: String,
-        val urlName: String,
-        val artifact: String? = null,
-    )
-
-    val cores: List<CoreEntry> = listOf(
-        CoreEntry("mgba", "GB / GBC / GBA", "mgba_libretro"),
-        CoreEntry("mesen", "NES", "mesen_libretro"),
-        CoreEntry("snes9x", "SNES", "snes9x_libretro"),
-        CoreEntry("genesis_plus_gx", "Genesis / Mega Drive", "genesis_plus_gx_libretro"),
-        CoreEntry("beetle_psx_hw", "PS1 (accurate)", "mednafen_psx_hw_libretro"),
-        CoreEntry("pcsx_rearmed", "PS1 (fast)", "pcsx_rearmed_libretro"),
-        CoreEntry("melonds", "DS", "melonds_libretro"),
-        CoreEntry("mednafen_saturn", "Saturn", "mednafen_saturn_libretro"),
-        CoreEntry("nestopia", "NES (alt)", "nestopia_libretro"),
-        CoreEntry("gambatte", "GB / GBC (alt)", "gambatte_libretro"),
-        CoreEntry("sameboy", "GB / GBC (accurate)", "sameboy_libretro"),
-        CoreEntry("fbneo", "Arcade", "fbneo_libretro"),
-        CoreEntry("picodrive", "Genesis / 32X", "picodrive_libretro"),
-        CoreEntry("mupen64plus_next", "N64 (software render)", "mupen64plus_next_libretro"),
-        CoreEntry("azahar", "3DS", "azahar_libretro", artifact = "azahar_libretro.so.zip"),
-        CoreEntry("play", "PS2", "play_libretro"),
-        // PSP/GC/Wii/Dreamcast: available on buildbot but require Vulkan
-        // (Android has native Vulkan — no MoltenVK needed). Untested.
-        CoreEntry("ppsspp", "PSP (Vulkan)", "ppsspp_libretro"),
-        CoreEntry("flycast", "Dreamcast (Vulkan)", "flycast_libretro"),
-        CoreEntry("dolphin", "GameCube / Wii (Vulkan)", "dolphin_libretro"),
-    )
+    val cores: List<MobileCoreEntry> = AndroidCoreCatalog.entries
 
     // Current buildbot layout is /android/latest/<abi>/, and artifacts carry
     // an _android infix; the ABI is chosen at runtime so emulators/devices on
@@ -81,7 +49,7 @@ class AndroidCoreDownloader(private val coresDir: File) {
             h[2] == 'L'.code.toByte() && h[3] == 'F'.code.toByte()
     }
 
-    fun isInstalled(entry: CoreEntry): Boolean =
+    fun isInstalled(entry: MobileCoreEntry): Boolean =
         File(coresDir, "${entry.name}_libretro.so").let {
             it.exists() && it.length() > 0 && looksLikeElf(it)
         }
@@ -92,7 +60,7 @@ class AndroidCoreDownloader(private val coresDir: File) {
      * Download one core. Synchronous; call from Dispatchers.IO.
      * Returns true on success. [onProgress] receives status text.
      */
-    fun download(entry: CoreEntry, onProgress: (String) -> Unit = {}): Boolean {
+    fun download(entry: MobileCoreEntry, onProgress: (String) -> Unit = {}): Boolean {
         coresDir.mkdirs()
         val soName = "${entry.name}_libretro.so"
         val finalFile = File(coresDir, soName)

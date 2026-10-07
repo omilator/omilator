@@ -10,6 +10,7 @@ import com.omilator.core.libretro.api.Framebuffer
 import com.omilator.core.libretro.api.Geometry
 import com.omilator.core.libretro.api.InputSource
 import com.omilator.core.libretro.api.PixelFormat
+import com.omilator.core.libretro.api.RetroSystemAvInfo
 import com.omilator.core.libretro.api.SystemInfo
 import com.omilator.core.libretro.api.Timing
 import com.omilator.core.libretro.api.VideoSink
@@ -26,6 +27,7 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
         const val GET_VARIABLE = 15
         const val SET_VARIABLES = 16
         const val GET_VARIABLE_UPDATE = 17
+        const val SET_SYSTEM_AV_INFO = 32
         const val GET_AUDIO_VIDEO_ENABLE = 47 or EXPERIMENTAL
         const val GET_INPUT_BITMASKS = 51 or EXPERIMENTAL
         const val GET_CORE_OPTIONS_VERSION = 52
@@ -50,6 +52,13 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
 
     /** Set when a UI option change lands; cleared once the core observed it. */
     private var variablesDirty = false
+
+    /** Mid-run SET_SYSTEM_AV_INFO forwarder (see onEnvironment cmd 32). */
+    private var systemAvInfoListener: ((AvInfo) -> Unit)? = null
+
+    override fun setSystemAvInfoListener(listener: ((AvInfo) -> Unit)?) {
+        systemAvInfoListener = listener
+    }
 
     override val isLoaded: Boolean get() = loaded
     override val memorySize: UInt = 0u
@@ -215,6 +224,25 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
             }
             SET_INPUT_DESCRIPTORS -> {
                 parseInputDescriptors(dataPtr)
+                true
+            }
+            SET_SYSTEM_AV_INFO -> {
+                // Forward so mid-run display-mode changes reach run-loop
+                // pacing + audio reconfigure: the command was previously
+                // declined, which made MobilePlayerScreen's listener
+                // registration dead wiring on both mobile platforms
+                // (pass C finding 3).
+                if (dataPtr != 0L) {
+                    val info = RetroSystemAvInfo.parse(
+                        dataPtr,
+                        ::readNativeInt,
+                        ::readNativeFloat,
+                        ::readNativeDouble,
+                    )
+                    systemAvInfoListener?.invoke(info)
+                }
+                // Accepted even with a NULL payload (probe semantics —
+                // mirrors desktop): nothing to parse, nothing to notify.
                 true
             }
             GET_AUDIO_VIDEO_ENABLE -> {
@@ -428,6 +456,8 @@ internal class JniCoreController(private val systemDirectory: String) : CoreCont
     private external fun writeNativeInt(ptr: Long, value: Int)
     private external fun writeNativeByte(ptr: Long, value: Byte)
     private external fun readNativeLong(ptr: Long): Long
+    private external fun readNativeFloat(ptr: Long): Float
+    private external fun readNativeDouble(ptr: Long): Double
     private external fun readNativeCString(ptr: Long): String?
     private external fun installNativeString(handle: Long, ptr: Long, value: String)
     private external fun clearNativePtr(ptr: Long)

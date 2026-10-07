@@ -659,6 +659,20 @@ Java_com_omilator_core_libretro_impl_JniCoreController_readNativeLong(
     return *reinterpret_cast<long*>(ptr);
 }
 
+JNIEXPORT jfloat JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_readNativeFloat(
+    JNIEnv*, jobject, jlong ptr) {
+    if (ptr == 0) return 0.0f;
+    return *reinterpret_cast<float*>(ptr);
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_omilator_core_libretro_impl_JniCoreController_readNativeDouble(
+    JNIEnv*, jobject, jlong ptr) {
+    if (ptr == 0) return 0.0;
+    return *reinterpret_cast<double*>(ptr);
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_omilator_core_libretro_impl_JniCoreController_readNativeCString(
     JNIEnv* env, jobject, jlong ptr) {

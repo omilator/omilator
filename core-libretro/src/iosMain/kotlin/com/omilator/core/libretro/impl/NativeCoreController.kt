@@ -17,6 +17,7 @@ import platform.posix.fseek
 import platform.posix.fseeko
 import platform.posix.ftello
 import platform.posix.fread
+import platform.posix.memcpy
 import platform.posix.memset
 
 @ThreadLocal
@@ -128,62 +129,110 @@ internal class NativeCoreController : CoreController {
     internal var audioSink: AudioSink? = null
     internal var inputSource: InputSource? = null
 
+    /** Mid-run SET_SYSTEM_AV_INFO forwarding (see handleEnv cmd 32). */
+    internal var systemAvInfoListener: ((AvInfo) -> Unit)? = null
+    override fun setSystemAvInfoListener(listener: ((AvInfo) -> Unit)?) {
+        systemAvInfoListener = listener
+    }
+
+    companion object {
+        /** RETRO_MEMORY_SAVE_RAM. */
+        private val SAVE_RAM_REGION: UInt = 0u
+
+        // Process-wide single-flight slot serializing iOS core sessions
+        // (pass C finding 1): Compose cancels a leaving screen's effect
+        // without joining its NonCancellable teardown, and the deep-link
+        // poller can fire the next session within one 100ms tick of exit —
+        // two controller lifecycles then coexist on Dispatchers.Default
+        // workers and race the shared trampoline resolution this class
+        // routes every native callback through (the old unloadCore nulls
+        // nativeControllerInstance mid-init of the new core, or the old
+        // teardown's callbacks bleed into the NEW controller's sinks).
+        // loadCore acquires; unloadCore releases at its tail — session
+        // N+1's load waits for session N's full teardown (SRAM flush
+        // included). Android is immune by construction (per-handle
+        // CoreState behind a thread-local active guard in the JNI bridge).
+        internal val sessionSlot = CoreSessionGuard()
+    }
+
+    /** This session's CoreSessionGuard ownership token — non-null exactly
+     *  while the slot is held by this controller (acquire stores it, every
+     *  release path consumes it), which is what makes the overlapping
+     *  failure-path releases exactly-once. */
+    private var sessionToken: CoreSessionGuard.Token? = null
+
+    private fun releaseSessionSlot() {
+        val token = sessionToken
+        sessionToken = null
+        sessionSlot.release(token)
+    }
+
     override val isLoaded get() = loaded
     override val memorySize: UInt = 0u
 
     override suspend fun loadCore(path: String): SystemInfo {
+        sessionToken = sessionSlot.acquire()
         nativeControllerInstance = this
-        // Try the caller-supplied path first (runtime-downloaded cores in
-        // Documents/cores/). If that fails, look for a bundled copy inside
-        // the app's Frameworks/ directory (cores shipped via setup-cores.sh).
-        val h = dlopen(path, _RTLD_NOW)
-            ?: dlopenBundledCore(path) ?: run {
-                val err = _dlerror()?.toKString() ?: "unknown"
-                throw RuntimeException("dlopen failed: $path — $err")
+        try {
+            // Try the caller-supplied path first (runtime-downloaded cores in
+            // Documents/cores/). If that fails, look for a bundled copy inside
+            // the app's Frameworks/ directory (cores shipped via setup-cores.sh).
+            val h = dlopen(path, _RTLD_NOW)
+                ?: dlopenBundledCore(path) ?: run {
+                    val err = _dlerror()?.toKString() ?: "unknown"
+                    throw RuntimeException("dlopen failed: $path — $err")
+                }
+            handle = h
+            corePath = path
+
+            // Set callbacks — cast function pointers to opaque
+            val envPtr: COpaquePointer? = envCb
+            val videoPtr: COpaquePointer? = videoCb
+            val audioBatchPtr: COpaquePointer? = audioBatchCb
+            val audioSamplePtr: COpaquePointer? = audioSampleCb
+            val inputPollPtr: COpaquePointer? = inputPollCb
+            val inputStatePtr: COpaquePointer? = inputStateCb
+
+            // Canonical order: environment AND media callbacks all go in before
+            // retro_init — a core may consult any callback during init.
+            dlsym(h, "retro_set_environment")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(envPtr)
+            dlsym(h, "retro_set_video_refresh")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(videoPtr)
+            dlsym(h, "retro_set_audio_sample_batch")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(audioBatchPtr)
+            dlsym(h, "retro_set_audio_sample")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(audioSamplePtr)
+            dlsym(h, "retro_set_input_poll")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(inputPollPtr)
+            dlsym(h, "retro_set_input_state")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(inputStatePtr)
+
+            // retro_init
+            dlsym(h, "retro_init")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
+
+            // retro_get_system_info
+            var name = "unknown"
+            var version = "0.0"
+            var ext = ""
+            memScoped {
+                val buf = allocArray<ByteVar>(32)
+                memset(buf, 0, 32u)
+                dlsym(h, "retro_get_system_info")
+                    ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Unit>>()
+                    ?.invoke(buf)
+                val ptrs = buf.reinterpret<CPointerVar<ByteVar>>()
+                name = ptrs[0]?.toKString() ?: "unknown"
+                version = ptrs[1]?.toKString() ?: "0.0"
+                ext = ptrs[2]?.toKString() ?: ""
+                // struct retro_system_info: 3 pointers then the two bools at 24/25
+                needFullPath = buf[24].toInt() != 0
             }
-        handle = h
-        corePath = path
 
-        // Set callbacks — cast function pointers to opaque
-        val envPtr: COpaquePointer? = envCb
-        val videoPtr: COpaquePointer? = videoCb
-        val audioBatchPtr: COpaquePointer? = audioBatchCb
-        val audioSamplePtr: COpaquePointer? = audioSampleCb
-        val inputPollPtr: COpaquePointer? = inputPollCb
-        val inputStatePtr: COpaquePointer? = inputStateCb
-
-        // Canonical order: environment AND media callbacks all go in before
-        // retro_init — a core may consult any callback during init.
-        dlsym(h, "retro_set_environment")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(envPtr)
-        dlsym(h, "retro_set_video_refresh")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(videoPtr)
-        dlsym(h, "retro_set_audio_sample_batch")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(audioBatchPtr)
-        dlsym(h, "retro_set_audio_sample")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(audioSamplePtr)
-        dlsym(h, "retro_set_input_poll")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(inputPollPtr)
-        dlsym(h, "retro_set_input_state")?.reinterpret<CFunction<(COpaquePointer?) -> Unit>>()?.invoke(inputStatePtr)
-
-        // retro_init
-        dlsym(h, "retro_init")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
-
-        // retro_get_system_info
-        var name = "unknown"
-        var version = "0.0"
-        var ext = ""
-        memScoped {
-            val buf = allocArray<ByteVar>(32)
-            memset(buf, 0, 32u)
-            dlsym(h, "retro_get_system_info")
-                ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Unit>>()
-                ?.invoke(buf)
-            val ptrs = buf.reinterpret<CPointerVar<ByteVar>>()
-            name = ptrs[0]?.toKString() ?: "unknown"
-            version = ptrs[1]?.toKString() ?: "0.0"
-            ext = ptrs[2]?.toKString() ?: ""
-            // struct retro_system_info: 3 pointers then the two bools at 24/25
-            needFullPath = buf[24].toInt() != 0
+            loaded = true
+            return SystemInfo(name, version, ext.split("|").filter { it.isNotBlank() }, false, false)
+        } catch (t: Throwable) {
+            // A failed load must release the session slot before the error
+            // surfaces: the follow-up runCatching teardown in
+            // MobilePlayerScreen calls unloadCore with loaded == false,
+            // whose token is already consumed here (no-op there).
+            releaseSessionSlot()
+            throw t
         }
-
-        loaded = true
-        return SystemInfo(name, version, ext.split("|").filter { it.isNotBlank() }, false, false)
     }
 
     // Retained native allocations for retro_game_info. The old shape wrote
@@ -205,6 +254,12 @@ internal class NativeCoreController : CoreController {
 
     override suspend fun loadGame(romPath: String): AvInfo {
         check(loaded) { throw CoreNotLoadedException("Core not loaded") }
+        // The trampoline target is per-thread and loadCore may have run on
+        // a different Dispatchers.Default worker: (re)establish it around
+        // every native call that can fire callbacks — retro_load_game
+        // queries env extensively, and callbacks that resolve a STALE
+        // controller (or null) drop env answers mid-init.
+        nativeControllerInstance = this
         freeGameInfo()
 
         // struct retro_game_info { char* path; void* data; size_t size; char* meta; } = 32 bytes
@@ -273,12 +328,20 @@ internal class NativeCoreController : CoreController {
         dlsym(handle, "retro_get_system_av_info")
             ?.reinterpret<CFunction<(CPointer<ByteVar>?) -> Unit>>()
             ?.invoke(buf)
+        parseSystemAvInfo(buf)
+    }
+
+    /** Shared parse for both av-info sources (retro_get_system_av_info's
+     *  out-param and SET_SYSTEM_AV_INFO's payload) — same layout, same
+     *  sane defaults for unset fields. Offsets are pinned on the desktop
+     *  side by SetSystemAvInfoTest against LibretroLayouts. */
+    private fun parseSystemAvInfo(buf: CPointer<ByteVar>): AvInfo {
         val ints = buf.reinterpret<IntVar>()
         val aspect = buf.reinterpret<FloatVar>()[4]
         val doubles = buf.reinterpret<DoubleVar>()
         val fps = doubles[3]
         val rate = doubles[4]
-        AvInfo(
+        return AvInfo(
             Geometry(
                 ints[0].toUInt(), ints[1].toUInt(), ints[2].toUInt(), ints[3].toUInt(),
                 if (aspect > 0f) aspect else 1.5f,
@@ -299,17 +362,33 @@ internal class NativeCoreController : CoreController {
         }
     }
 
-    override fun reset() { dlsym(handle, "retro_reset")?.reinterpret<CFunction<() -> Unit>>()?.invoke() }
+    override fun reset() {
+        nativeControllerInstance = this
+        dlsym(handle, "retro_reset")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
+    }
     override fun unloadGame() {
+        // Teardown callbacks (some cores flush audio/env during
+        // retro_unload_game) must resolve THIS controller — the
+        // NonCancellable teardown coroutine may run on yet another
+        // Dispatchers.Default worker whose thread-local still holds a
+        // stale session or null.
+        nativeControllerInstance = this
         dlsym(handle, "retro_unload_game")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
         freeGameInfo()
     }
     override fun unloadCore() {
+        nativeControllerInstance = this
+        // The token is non-null exactly while this controller holds the
+        // slot: a failed loadCore already consumed it in its catch, so
+        // MobilePlayerScreen's runCatching teardown reaching here after a
+        // failed load releases nothing (and a second unloadCore is a no-op).
         dlsym(handle, "retro_deinit")?.reinterpret<CFunction<() -> Unit>>()?.invoke()
         handle?.let { dlclose(it) }
-        handle = null; loaded = false; nativeControllerInstance = null
+        handle = null; loaded = false
         retainedEnvStrings.forEach(nativeHeap::free)
         retainedEnvStrings.clear()
+        releaseSessionSlot()
+        nativeControllerInstance = null
     }
 
     override fun attach(video: VideoSink, audio: AudioSink, input: InputSource) {
@@ -325,6 +404,47 @@ internal class NativeCoreController : CoreController {
     override fun cheatReset() {}
     override fun cheatSet(index: Int, enabled: Boolean, code: String) {}
 
+    // Battery-backed SRAM. These were missing entirely (the interface's
+    // empty no-op defaults silently answered every read), which made the
+    // whole pass-11 IosSramStore round-trip inert on iOS: the restore
+    // gate always saw an empty block, and the teardown flush always read
+    // empty bytes and never wrote the store — verified while fixing pass C
+    // finding 5, whose overwrite failure mode only exists once flushing
+    // works. retro_get_memory_data/size are plain accessors (no callbacks),
+    // so they need no trampoline-target establishment.
+    override fun readSaveRam(): ByteArray {
+        val data = saveRamData() ?: return ByteArray(0)
+        val size = saveRamSize()
+        if (size <= 0) return ByteArray(0)
+        return ByteArray(size).also { bytes ->
+            bytes.usePinned { pinned -> memcpy(pinned.addressOf(0), data, size.toULong()) }
+        }
+    }
+
+    override fun writeSaveRam(data: ByteArray) {
+        if (data.isEmpty()) return
+        val ram = saveRamData() ?: return
+        val size = saveRamSize()
+        if (size <= 0) return
+        // All-or-nothing like Android's JNI bridge: a partial prefix copy
+        // would leave a half-restored block while the read-back gate
+        // refuses to flush. The Kotlin-side gate handles migration.
+        if (data.size != size) return
+        data.usePinned { pinned -> memcpy(ram, pinned.addressOf(0), size.toULong()) }
+    }
+
+    private fun saveRamData(): CPointer<ByteVar>? =
+        dlsym(handle, "retro_get_memory_data")
+            ?.reinterpret<CFunction<(UInt) -> CPointer<ByteVar>?>>()
+            ?.invoke(SAVE_RAM_REGION)
+
+    private fun saveRamSize(): Int =
+        dlsym(handle, "retro_get_memory_size")
+            ?.reinterpret<CFunction<(UInt) -> ULong>>()
+            ?.invoke(SAVE_RAM_REGION)
+            ?.toInt()
+            ?: 0
+
     internal fun handleEnv(cmd: Int, data: COpaquePointer?): Boolean {
         // Success only after the command's required output is written; the
         // old raw 0/9/19/31/51/69 list returned true for commands it never
@@ -335,6 +455,17 @@ internal class NativeCoreController : CoreController {
                 data != null
             }
             14 -> handleSetHwRender(data?.reinterpret<ByteVar>())
+            32 -> { // SET_SYSTEM_AV_INFO — forward so mid-run mode changes
+                // reach run-loop pacing + audio reconfigure; the command
+                // was previously declined, which made MobilePlayerScreen's
+                // listener registration dead wiring (pass C finding 3).
+                if (data != null) {
+                    systemAvInfoListener?.invoke(parseSystemAvInfo(data.reinterpret<ByteVar>()))
+                }
+                // Accepted even with a NULL payload (probe semantics —
+                // mirrors desktop): nothing to parse, nothing to notify.
+                true
+            }
             9, 31 -> { // GET_SYSTEM_DIRECTORY / GET_SAVE_DIRECTORY
                 if (data != null) {
                     val dir = systemDir ?: ""

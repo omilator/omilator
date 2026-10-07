@@ -161,38 +161,6 @@ fun MobilePlayerScreen(
         withContext(Dispatchers.Default) {
             try {
                 coreController.loadCore(corePath)
-                val avInfo = coreController.loadGame(romPath)
-                val saved = sramStore?.read()
-                val decision = runCatching {
-                    evaluateSramRestore(
-                        saved = saved,
-                        readSaveRam = coreController::readSaveRam,
-                        writeSaveRam = coreController::writeSaveRam,
-                    )
-                }.getOrNull()
-                when {
-                    decision == null ->
-                        sramNotice = "Battery save could not be read; progress will not be saved this session."
-                    decision.migrate -> {
-                        if (sramStore != null && sramStore.backupExisting()) {
-                            // Size mismatch: old bytes preserved under a backup
-                            // name, core RAM adopted as the start of a new save.
-                            sramAuthoritative = true
-                            sramNotice = decision.notice
-                        } else {
-                            // Could not back the old save up (or no store):
-                            // never flush fresh core RAM over it.
-                            sramNotice = "Battery save could not be backed up; progress will not be saved this session."
-                        }
-                    }
-                    else -> {
-                        sramAuthoritative = decision.authoritative
-                        sramNotice = decision.notice
-                    }
-                }
-                frameW = avInfo.geometry.baseWidth.toInt()
-                frameH = avInfo.geometry.baseHeight.toInt()
-                audioOutput.configure(avInfo.timing.sampleRate, channels = 2)
                 // Mid-run SET_SYSTEM_AV_INFO: geometry is tracked per frame
                 // below, but timing must be forwarded explicitly — the loop
                 // paces and the audio output are configured once otherwise,
@@ -200,11 +168,43 @@ fun MobilePlayerScreen(
                 // screen is reopened. Fires on the core thread (inside
                 // runFrame), the same thread that calls write(), so the
                 // reconfigure never races it.
-                val intervalNanos = atomic((1_000_000_000.0 / avInfo.timing.fps).toLong())
-                coreController.setSystemAvInfoListener { info ->
-                    intervalNanos.value = (1_000_000_000.0 / info.timing.fps).toLong()
-                    runCatching { audioOutput.configure(info.timing.sampleRate, channels = 2) }
+                //
+                // Registered BEFORE loadGame (cores can report a new mode as
+                // early as content load — desktop registers before loadGame
+                // for the same reason), and guarded by the same epsilons
+                // desktop's PlayerEngine uses: configure() rebuilds the
+                // whole platform audio stack (AVAudioEngine / AudioTrack),
+                // and float-noise repeats (59.940 vs 59.9401) or cores that
+                // re-assert the command must not trigger that churn.
+                val intervalNanos = atomic((1_000_000_000.0 / 60.0).toLong())
+                var appliedFps = 0f
+                var appliedSampleRate = 0.0
+                fun applyTiming(info: com.omilator.core.libretro.api.AvInfo) {
+                    if (AvTimingGuard.fpsChanged(appliedFps, info.timing.fps)) {
+                        appliedFps = info.timing.fps
+                        intervalNanos.value = (1_000_000_000.0 / info.timing.fps).toLong()
+                    }
+                    if (AvTimingGuard.sampleRateChanged(appliedSampleRate, info.timing.sampleRate)) {
+                        appliedSampleRate = info.timing.sampleRate
+                        runCatching { audioOutput.configure(info.timing.sampleRate, channels = 2) }
+                    }
                 }
+                coreController.setSystemAvInfoListener(::applyTiming)
+                val avInfo = coreController.loadGame(romPath)
+                // loadGame's return value is the core's CURRENT av info —
+                // apply it through the same guarded path (the first apply
+                // always passes the epsilon, so load-time values stick; a
+                // mid-load report that already applied them is absorbed).
+                applyTiming(avInfo)
+                val restore = restoreMobileSram(
+                    sramStore = sramStore,
+                    readSaveRam = coreController::readSaveRam,
+                    writeSaveRam = coreController::writeSaveRam,
+                )
+                sramAuthoritative = restore.authoritative
+                sramNotice = restore.notice
+                frameW = avInfo.geometry.baseWidth.toInt()
+                frameH = avInfo.geometry.baseHeight.toInt()
                 val latestFrame = arrayOfNulls<Framebuffer>(1)
                 coreController.attach(
                     video = { fb -> latestFrame[0] = fb },

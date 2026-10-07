@@ -572,3 +572,51 @@ fake core pinning no-runFrame-after-unloadGame; PlayerEngineSramTest
 Android compileDebugKotlinAndroid + iOS compileKotlinIosArm64 /
 IosSimulatorArm64 / IosX64 green. No commits made (per instruction); tree
 left dirty for review.
+
+## 2026-10-06 (pass 12) — pass-C audit: 6 findings, all fixed
+
+Report: `.audits/2026-10-06/passC-omilator.md` (4 Med, 2 Low). Fixed across
+three fixer generations (two cancelled mid-run, third verified everything):
+
+- **iOS session-overlap guard (Med)**: new `CoreSessionGuard` — token-based
+  mutex (`acquire()` mints a per-session owner token; kotlinx owner-keyed
+  mutex throws on same-owner re-lock, so a shared owner constant would have
+  broken quick-relaunch — reworked in pass 12). `NativeCoreController`
+  carries `sessionToken` for exactly-once release; per-call trampoline
+  re-establishment kept as defense-in-depth.
+- **Un-installable iOS core names (Med)**: shared `MobileCoreCatalog` for all
+  14 `GameSystem.preferredCore` stems on both platforms; canonical install
+  stems (`beetle_psx_hw` installs from the `mednafen_psx_hw` artifact); both
+  setup scripts fixed (azahar/play added). Catalog verified against the live
+  libretro buildbot listings 2026-10-07 (ios-arm64 `_ios` suffixes, bare
+  mgba/azahar/ppsspp/dolphin/flycast, `mednafen_psx_hw`; azahar absent from
+  android x86_64). One-time re-download needed for installs made under the
+  old `mednafen_psx_hw` name; old-name files are harmless orphans.
+- **Dead SET_SYSTEM_AV_INFO wiring (Med)**: cmd-32 forwarded in both mobile
+  controllers (JNI `readNativeFloat`/`readNativeDouble` readers added);
+  shared `RetroSystemAvInfo` parser pinned to the desktop layout;
+  epsilon-guarded `AvTimingGuard` listener registered before `loadGame`,
+  cleared first in teardown. Prerequisite surfaced and fixed: iOS SRAM
+  accessors (`readSaveRam`/`writeSaveRam`) never existed — now implemented.
+- **Close budget vs blocking IO (Med)**: `sendAwaiting` is join-based on a
+  bounded budget. Critical fix: removed `CoroutineStart.UNDISPATCHED` —
+  with the tracker scope on `Dispatchers.IO` the interceptor-equality fast
+  path ran the blocking socket call INLINE on the caller (proven: 15,041ms
+  elapsed against a 200ms budget). Plain queued launches + bounded join.
+- **iOS SRAM read-vs-absent (Low)**: `IosSramStore` throws on open/read/
+  short-read; `null` only for absent. `MobileSramRestore` seam propagates.
+- **Queued report dropped (Low)**: IO-lifetime tracker scope keeps the
+  coroutine context alive past close.
+
+Tests: full forced rerun **143/143 green** (baseline 118 + 25 new:
+core-libretro +7, ui-shared +11, data-library +5, app-desktop +2); Android
+`assembleDebug` green with the JNI bridge rebuilt (`libomilator_jni.so`,
+`externalNativeBuildDebug --rerun-tasks` verified); iOS
+compileKotlinIosArm64/IosSimulatorArm64/IosX64 + linkDebugFramework (arm64,
+simulator-arm64) green.
+
+Pre-existing (not fixed here, next pass): root `compileKotlinIosArm64`
+fails at HEAD too — `data-launcher` commonMain references `java.lang.Process`
+(`StandaloneBackend.kt:38,51,58`); module is desktop-only in practice
+(`ui-shared` does not depend on it). Recommend expect/actual or moving the
+interface to desktopMain.

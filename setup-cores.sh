@@ -22,13 +22,28 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 MODE="--sim"
+# Core stems are the CANONICAL names the app's routing requests
+# (GameSystem.preferredCore + "_libretro" — see coreNameForRom), so
+# beetle_psx_hw must appear here even though the buildbot publishes it
+# under its legacy mednafen_psx_hw name (url_stem below maps it). azahar
+# (3DS) and play (PS2) are routed by the shared table and join the
+# default bundle set.
 CORES_TO_BUNDLE=(
-    mgba mesen snes9x genesis_plus_gx mednafen_psx_hw pcsx_rearmed
+    mgba mesen snes9x genesis_plus_gx beetle_psx_hw pcsx_rearmed
     melonds mednafen_saturn nestopia gambatte sameboy fbneo picodrive
-    mupen64plus_next
+    mupen64plus_next azahar play
     # HW-render cores (require MoltenVK — run setup-moltenvk.sh first):
     ppsspp dolphin flycast
 )
+
+# The buildbot publishes beetle_psx_hw under its legacy mednafen_psx_hw
+# name; the bundled filename keeps the canonical stem the app requests.
+url_stem() {
+    case "$1" in
+        beetle_psx_hw) echo "mednafen_psx_hw" ;;
+        *) echo "$1" ;;
+    esac
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,8 +79,10 @@ echo ""
 
 for core in "${CORES_TO_BUNDLE[@]}"; do
     # Buildbot filenames are inconsistent — some cores use _ios suffix, some don't.
-    # Try both. URL-name → final dylib name is normalized to <core>_libretro.dylib.
-    for url_name in "${core}_libretro_ios" "${core}_libretro"; do
+    # Try both. URL-name → final dylib name is normalized to <core>_libretro.dylib
+    # (url_stem maps beetle_psx_hw to its published mednafen_psx_hw name).
+    stem="$(url_stem "$core")"
+    for url_name in "${stem}_libretro_ios" "${stem}_libretro"; do
         url="${BUILDBOT}/${url_name}.dylib.zip"
         zip_file="${WORK_DIR}/${core}.zip"
         if curl -fsSL --max-time 60 "$url" -o "$zip_file"; then

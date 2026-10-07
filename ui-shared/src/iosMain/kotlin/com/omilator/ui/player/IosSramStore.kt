@@ -80,19 +80,34 @@ class IosSramStore(
         return runCatching { rename(file, "$dir/$name") == 0 }.getOrDefault(false)
     }
 
+    /** Fail-safe read: `null` means ONLY "no save file exists". A file
+     *  that exists but cannot be opened/read (damaged file, permission
+     *  hiccup, iCloud-evicted placeholder under the file-sharing-enabled
+     *  Documents dir) THROWS — mapping it to null made fresh core RAM
+     *  authoritative and the teardown flush overwrote the only durable
+     *  copy, exactly the outcome the gate architecture prevents. Android
+     *  (readBytes) and desktop already fail safe this way; the throw
+     *  lands in MobilePlayerScreen's outer catch → error surface + flush
+     *  gate closed. A short read throws too: a truncated block would
+     *  silently trip the migrate path instead of surfacing. */
     private fun readFile(path: String): ByteArray? {
         val fm = NSFileManager.defaultManager()
         if (!fm.fileExistsAtPath(path)) return null
         return memScoped {
-            val fp = fopen(path, "rb") ?: return@memScoped null
+            val fp = fopen(path, "rb")
+                ?: throw RuntimeException("cannot open battery save for reading: $path")
             try {
                 fseek(fp, 0, 2) // SEEK_END
                 val size = ftell(fp).toInt()
                 fseek(fp, 0, 0) // SEEK_SET
-                if (size <= 0) return@memScoped ByteArray(0)
+                if (size < 0) throw RuntimeException("cannot size battery save: $path")
+                if (size == 0) return@memScoped ByteArray(0)
                 val buf = allocArray<ByteVar>(size)
                 val read = fread(buf, 1u, size.toULong(), fp)
-                if (read == 0UL) null else buf.readBytes(read.toInt())
+                if (read != size.toULong()) {
+                    throw RuntimeException("short read on battery save: $path ($read/$size)")
+                }
+                buf.readBytes(read.toInt())
             } finally {
                 fclose(fp)
             }

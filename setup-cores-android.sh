@@ -14,11 +14,30 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Core stems are the CANONICAL names the app's routing requests
+# (GameSystem.preferredCore + "_libretro" — MainActivity's
+# bundledCorePath looks for lib<stem>_libretro.so), so beetle_psx_hw must
+# appear here even though the buildbot publishes it under its legacy
+# mednafen_psx_hw name (url_stem below maps it). A bundled APK built with
+# the old mednafen_psx_hw stem could never launch PS1 without
+# re-downloading cores.
 CORES_TO_BUNDLE=(
-    mgba mesen snes9x genesis_plus_gx mednafen_psx_hw pcsx_rearmed
+    mgba mesen snes9x genesis_plus_gx beetle_psx_hw pcsx_rearmed
     melonds mednafen_saturn nestopia gambatte sameboy fbneo picodrive
-    mupen64plus_next
+    mupen64plus_next azahar play
 )
+# azahar is arm64-only on the buildbot: the x86_64 pass FAILs and is
+# skipped below (an emulator-only x86_64 install simply has no 3DS core,
+# same as before).
+
+# The buildbot publishes beetle_psx_hw under its legacy mednafen_psx_hw
+# name; the bundled filename keeps the canonical stem the app requests.
+url_stem() {
+    case "$1" in
+        beetle_psx_hw) echo "mednafen_psx_hw" ;;
+        *) echo "$1" ;;
+    esac
+}
 
 if [[ $# -gt 0 ]]; then
     CORES_TO_BUNDLE=("$@")
@@ -30,10 +49,13 @@ mkdir -p "$JNI_DIR/arm64-v8a" "$JNI_DIR/x86_64"
 WORK_DIR="$(mktemp -d)"
 trap "rm -rf '$WORK_DIR'" EXIT
 
-# Android buildbot serves cores per-ABI as separate zips.
+# Android buildbot serves cores per-ABI as separate zips. NOTE the layout:
+# android/latest/<abi> (the android/<abi>/latest path this script used for
+# its whole life 404s — every bundled-APK core download silently failed
+# while stale jniLibs kept the script looking healthy).
 declare -A BUILDBOT_BASE=(
-    [arm64-v8a]="https://buildbot.libretro.com/nightly/android/arm64-v8a/latest"
-    [x86_64]="https://buildbot.libretro.com/nightly/android/x86_64/latest"
+    [arm64-v8a]="https://buildbot.libretro.com/nightly/android/latest/arm64-v8a"
+    [x86_64]="https://buildbot.libretro.com/nightly/android/latest/x86_64"
 )
 
 echo "Cores: ${CORES_TO_BUNDLE[*]}"
@@ -42,8 +64,10 @@ echo ""
 
 for core in "${CORES_TO_BUNDLE[@]}"; do
     for abi in arm64-v8a x86_64; do
-        # Try both naming conventions.
-        for url_name in "${core}_libretro" "${core}_libretro_android"; do
+        # Try both naming conventions (url_stem maps beetle_psx_hw to its
+        # published mednafen_psx_hw name; azahar drops the _android infix).
+        stem="$(url_stem "$core")"
+        for url_name in "${stem}_libretro" "${stem}_libretro_android"; do
             url="${BUILDBOT_BASE[$abi]}/${url_name}.so.zip"
             zip_file="${WORK_DIR}/${core}_${abi}.zip"
             if curl -fsSL --max-time 60 "$url" -o "$zip_file"; then

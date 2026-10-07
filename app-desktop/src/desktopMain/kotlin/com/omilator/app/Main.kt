@@ -57,8 +57,9 @@ import com.omilator.ui.player.PlayerEngine
 import com.omilator.ui.player.PlayerScreen
 import com.omilator.ui.settings.SettingsViewModel
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -165,14 +166,15 @@ fun main() {
         Unit
     }
 
-    // Session reporting runs on this application-lifetime scope: it must
-    // outlive the server page (and its ViewModel) that started the session,
-    // and reporting must not leak a detached thread per session.
-    val sessionReportScope = rememberCoroutineScope()
-    // Esc-fired (async) reports are tracked here so the window-close path
-    // can join them before exitProcess(0) — an in-flight POST otherwise
-    // dies with the process when the user closes within the request window.
-    val pendingReports = remember { PendingPlaytimeReports(sessionReportScope) }
+    // Session reporting runs on its own IO-lifetime scope, NOT the Compose
+    // application scope: the close handler blocks the Main/EDT thread inside
+    // runBlocking { awaitAll }, and a report that is merely queued on that
+    // same EDT dispatcher could never start — deterministically dropped
+    // after burning the whole budget, even with a healthy server (pass C
+    // finding 6). The send bodies hop to Dispatchers.IO internally anyway.
+    val pendingReports = remember {
+        PendingPlaytimeReports(CoroutineScope(SupervisorJob() + Dispatchers.IO))
+    }
     var launchError by remember { mutableStateOf<String?>(null) }
 
     val serverPage: (@Composable () -> Unit)? = if (serverConfigured) {
@@ -209,13 +211,21 @@ fun main() {
                                             // after, so the report must complete before
                                             // exitProcess(0) — an async launch would be
                                             // discarded with the process. Bounded to the
-                                            // close budget: the interactive 10s/30s socket
-                                            // timeouts are for gameplay, not exit — an
-                                            // unreachable server must not beachball the UI
-                                            // for ~40s ahead of (or instead of) teardown.
-                                            val sent = runBlocking {
-                                                withTimeoutOrNull(CLOSE_REPORT_BUDGET_MS) { send() }
-                                            } != null
+                                            // close budget — and enforced by JOINING the
+                                            // send, never by wrapping the send itself in
+                                            // withTimeoutOrNull: the timeout cannot resume
+                                            // while send() is suspended inside
+                                            // withContext(Dispatchers.IO) blocked on an
+                                            // HttpURLConnection socket (cooperative
+                                            // cancellation cannot interrupt it), so an
+                                            // inline timeout only returns after the socket
+                                            // budget (10s connect / 30s read) — the exact
+                                            // close-path beachball this budget exists to
+                                            // prevent (pass C finding 4). join() suspends
+                                            // passively and resumes at the timeout; the
+                                            // abandoned request dies with the process
+                                            // microseconds later.
+                                            val sent = pendingReports.sendAwaiting(send, CLOSE_REPORT_BUDGET_MS)
                                             if (!sent) {
                                                 System.err.println(
                                                     "[Omilator] Session report did not complete within " +
@@ -674,9 +684,42 @@ internal class PendingPlaytimeReports(private val scope: CoroutineScope) {
     private val jobs = java.util.concurrent.ConcurrentLinkedQueue<Job>()
 
     fun launch(send: suspend () -> Unit): Job {
+        // Plain queued launch on the tracker's own IO scope: the scope is
+        // a real thread pool (never the EDT the close handler blocks), so
+        // a queued report starts within microseconds and its blocking
+        // body runs on an IO thread. Deliberately NOT UNDISPATCHED: an
+        // undispatched start would run the send's
+        // withContext(Dispatchers.IO) { HttpURLConnection ... } INLINE on
+        // the caller thread — withContext skips dispatch when the target
+        // interceptor equals the coroutine's own (the IO scope), parking
+        // the whole network call on the EDT (pass C finding 6's fix must
+        // not reintroduce finding 4's beachball on the Esc path).
         val job = scope.launch { send() }
         jobs.add(job)
         return job
+    }
+
+    /** Awaited close-path send (pass C finding 4). Bounded by JOINING the
+     *  send, never by timing out the send itself: the production send
+     *  suspends inside withContext(Dispatchers.IO) blocked on an
+     *  HttpURLConnection socket, which cooperative cancellation cannot
+     *  interrupt — withTimeoutOrNull around the send would only resume
+     *  after the 10s connect / 30s read socket budget, beachballing the
+     *  close handler for exactly the ~40s this budget exists to prevent.
+     *  The send is launched (queued) on the tracker's IO scope so its
+     *  blocking body runs on an IO thread, never on the caller;
+     *  join() suspends passively, so the timeout resumes it promptly; the
+     *  abandoned request is cancelled (it still cannot be interrupted,
+     *  but it is marked and dies with the process microseconds later).
+     *  NOT queued in [jobs]: a wedged awaited send must not also consume
+     *  the Esc-path awaitAll budget right after this returns false. */
+    fun sendAwaiting(send: suspend () -> Unit, timeoutMillis: Long): Boolean {
+        val job = scope.launch { send() }
+        val completed = runBlocking {
+            withTimeoutOrNull(timeoutMillis) { job.join() }
+        } != null
+        if (!completed) job.cancel()
+        return completed
     }
 
     /** Bounded join of every outstanding report. Returns true when all
